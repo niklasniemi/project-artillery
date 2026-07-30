@@ -1,5 +1,6 @@
 import { Game, WORLD_W, WORLD_H } from "./game";
-import { UI } from "./ui";
+import { UI, MatchSettings } from "./ui";
+import { Net, StartPayload } from "./net";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 canvas.width = WORLD_W;
@@ -15,6 +16,42 @@ window.addEventListener("resize", resize);
 resize();
 
 let game: Game;
+let net: Net | null = null;
+
+function ensureNet(): Net {
+  if (net) return net;
+  net = new Net();
+  net.onLobby = (view) => ui.showLobby(view);
+  net.onStart = (payload: StartPayload) => {
+    const settings: MatchSettings = {
+      ...payload.settings,
+      players: payload.seats.map((s) => ({ name: s.name, isAI: false })),
+    };
+    ui.closeLobby();
+    game.start(settings, {
+      seed: payload.seed,
+      online: {
+        mySeat: payload.mySeat,
+        send: (type, msg) => net?.send(type, msg),
+      },
+    });
+  };
+  net.onAim = (seat, angle, power) => game.remoteAim(seat, angle, power);
+  net.onDrive = (seat, x, y, fuel, facing) => game.remoteDrive(seat, x, y, fuel, facing);
+  net.onFire = (seat, msg) => game.remoteFire(seat, msg);
+  net.onSplit = (seat, msg) => game.remoteSplit(seat, msg);
+  net.onUpgrade = (seat, weaponIndex) => game.upgradeWeapon(weaponIndex, true, seat);
+  net.onCrate = (seat, index) => game.remoteCrate(seat, index);
+  net.onAdvance = (nextSeat, snapshot, gameOver) => game.advanceTurn(nextSeat, snapshot, gameOver);
+  net.onDropped = (reason) => {
+    game.online = null;
+    ui.clearHud();
+    ui.showMenu();
+    ui.netStatus(reason);
+  };
+  return net;
+}
+
 const ui = new UI({
   onStart: (settings) => game.start(settings),
   onFire: () => game.fire(),
@@ -22,6 +59,31 @@ const ui = new UI({
   onUpgrade: (i) => game.upgradeWeapon(i),
   onPlayAgain: () => {
     ui.clearHud();
+    if (net?.connected && net.lastLobby) {
+      ui.showLobby(net.lastLobby);
+    } else {
+      ui.showMenu();
+    }
+  },
+  onCreateRoom: async (name, settings) => {
+    try {
+      await ensureNet().create(name, settings);
+    } catch (err) {
+      ui.netStatus(`Could not reach server at ${(err as Error).message ?? "?"} — is it running?`);
+    }
+  },
+  onJoinRoom: async (name, code) => {
+    try {
+      await ensureNet().join(name, code);
+    } catch {
+      ui.netStatus("Join failed — check the code (room may be full or already playing).");
+    }
+  },
+  onReadyToggle: () => net?.send("ready"),
+  onStartOnline: () => net?.send("start"),
+  onLeaveRoom: () => {
+    net?.leave();
+    ui.closeLobby();
     ui.showMenu();
   },
 });
@@ -31,6 +93,7 @@ ui.showMenu();
 if (import.meta.env.DEV) {
   // Debug handle for driving the sim from the console / test tooling.
   (window as unknown as { __game: Game }).__game = game;
+  (window as unknown as { __net: () => Net }).__net = ensureNet;
 }
 
 // Fixed-timestep simulation (60 Hz) with rAF rendering.

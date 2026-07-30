@@ -31,6 +31,15 @@ export function seededRandom(seed: number): () => number {
   };
 }
 
+/** Seeded-RNG variants — used for all gameplay randomness so online clients stay in lockstep. */
+export function rngRange(rng: () => number, lo: number, hi: number): number {
+  return lo + rng() * (hi - lo);
+}
+
+export function rngPick<T>(rng: () => number, arr: readonly T[]): T {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
 export function formatDeg(rad: number): string {
   let d = Math.round((-rad * 180) / Math.PI);
   if (d < 0) d += 360;

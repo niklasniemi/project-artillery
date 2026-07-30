@@ -42,17 +42,23 @@ function simulateImpact(
  * target, then blur the result so the AI stays beatable.
  */
 export function planShot(shooter: Tank, tanks: Tank[], terrain: Terrain, wind: number): AiPlan {
-  const enemies = tanks.filter((t) => t.alive && t !== shooter);
-  // Prefer wounded targets, with a distance tiebreak.
+  const enemies = tanks.filter((t) => t.alive && t.isEnemyOf(shooter));
+  if (enemies.length === 0) {
+    // Everyone's dead or friendly (points-mode respawn gap) — fire far off to the side.
+    return { weaponIndex: 0, angle: shooter.x < 800 ? -Math.PI / 4 : -Math.PI * 0.75, power: 100 };
+  }
+  // Prefer wounded targets, with a distance tiebreak. VIPs are priority prey.
   let target = enemies[0];
   let bestScore = Infinity;
   for (const e of enemies) {
-    const score = e.hp * 2 + dist(shooter.x, shooter.y, e.x, e.y) * 0.1;
+    const score = e.hp * 2 + dist(shooter.x, shooter.y, e.x, e.y) * 0.1 - (e.isVIP ? 60 : 0);
     if (score < bestScore) { bestScore = score; target = e; }
   }
 
-  // AI keeps it simple: standard shells, mortar, or sniper.
-  const chosenId = pick(["shell", "mortar", "sniper"]);
+  // AI sticks to predictable-arc weapons; nuke comes out for wounded prey.
+  const pool = ["shell", "shell", "mortar", "sniper", "cluster"];
+  if (target.hp < 45) pool.push("nuke");
+  const chosenId = pick(pool);
   const weaponIndex = WEAPONS.findIndex((w) => w.id === chosenId);
   const def = WEAPONS[weaponIndex];
 

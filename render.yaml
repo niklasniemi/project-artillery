@@ -1,0 +1,14 @@
+# Render blueprint — deploys the multiplayer server.
+# Connect this repo at https://dashboard.render.com/blueprints, or create a
+# single Web Service manually with the same settings.
+services:
+  - type: web
+    name: artillery-server
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0

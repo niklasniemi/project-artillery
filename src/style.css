@@ -79,12 +79,17 @@ html, body {
 .aim-readout .power-bar i { display: block; height: 100%; background: var(--magenta); }
 
 .weapon-bar {
-  display: flex; gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(10, 46px);
+  gap: 5px;
   padding: 8px;
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 14px;
 }
+.weapon-slot.compact { width: 46px; height: 46px; }
+.weapon-slot.compact .icon { font-size: 19px; }
+
 .weapon-slot {
   width: 64px; height: 64px;
   border-radius: 10px;
@@ -227,7 +232,71 @@ html, body {
 }
 .btn.small { padding: 6px 14px; font-size: 12px; }
 
+/* ---------- Menu tabs, lobby & online ---------- */
+.panel.wide { min-width: 560px; max-width: 780px; }
+
+.tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.tab-btn {
+  flex: 1;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--dim); font-weight: 800; font-size: 13px; letter-spacing: 1px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.tab-btn.active {
+  color: var(--cyan);
+  background: rgba(77, 232, 255, 0.12);
+  border-color: var(--cyan);
+}
+
+.setting input[type="text"] {
+  width: 100%;
+  background: #131735; color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: 8px;
+  padding: 7px 10px; font-size: 13px;
+  text-transform: uppercase;
+}
+.setting input[type="text"]::placeholder { color: var(--dim); }
+
+.mode-desc {
+  font-size: 12px; color: var(--amber);
+  margin: -12px 0 18px;
+  min-height: 16px;
+}
+.divider {
+  text-align: center; color: var(--dim); font-size: 11px;
+  margin: 16px 0 14px;
+}
+.row-buttons { display: flex; gap: 10px; align-items: center; }
+.row-buttons .btn.primary { flex: 1; width: auto; }
+.net-status { margin-top: 12px; font-size: 12px; color: var(--amber); min-height: 15px; }
+.room-code {
+  color: var(--lime); letter-spacing: 3px;
+  background: rgba(182, 255, 77, 0.08);
+  padding: 2px 10px; border-radius: 8px;
+  user-select: text; -webkit-user-select: text;
+}
+.mode-info { color: var(--amber); font-weight: 700; font-size: 12px; }
+.wname-current {
+  margin-top: 2px;
+  font-size: 11px; font-weight: 700; color: var(--cyan);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 120px;
+}
+
 /* ---------- Upgrade panel ---------- */
+.upgrade-list.grid2 {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+.upgrade-list.grid2 .upgrade-row { padding: 6px 10px; }
+.upgrade-list.grid2 .upgrade-row .desc { display: none; }
+.upgrade-list.grid2 .upgrade-row .icon { font-size: 17px; width: 22px; }
+.upgrade-list.grid2 .upgrade-row .info b { font-size: 12px; }
+
 .upgrade-list { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 18px; }
 .upgrade-row {
   display: flex; align-items: center; gap: 12px;

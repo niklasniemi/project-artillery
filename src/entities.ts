@@ -28,7 +28,7 @@ export class Tank {
   x: number;
   y: number;
   hp: number;
-  readonly maxHp: number;
+  maxHp: number;
   fuel: number;
   readonly maxFuel: number;
   angle = -Math.PI / 3; // radians; 0 = right, negative = up
@@ -38,6 +38,14 @@ export class Tank {
   fallFrom = -1;
   facing: 1 | -1 = 1;
 
+  // Game-mode roles
+  seat = 0;         // stable index; equals array index locally, server seat online
+  team = -1;        // -1 = free-for-all
+  isVIP = false;    // assassination
+  isJuggernaut = false;
+  kills = 0;
+  turnsTaken = 0;
+
   // In-match progression (resets every game — the whole point).
   xp = 0;
   level = 0;
@@ -45,6 +53,16 @@ export class Tank {
   weaponTiers: number[] = WEAPONS.map(() => 0);
   selectedWeapon = 0;
   damageDealt = 0;
+
+  /** Points-mode score. */
+  get score(): number {
+    return Math.round(this.damageDealt) + this.kills * 50;
+  }
+
+  isEnemyOf(other: Tank): boolean {
+    if (other === this) return false;
+    return this.team < 0 || other.team < 0 || this.team !== other.team;
+  }
 
   constructor(
     public readonly name: string,
@@ -125,6 +143,20 @@ export class Tank {
     const { x, y, palette } = this;
     ctx.save();
 
+    if (this.isJuggernaut) {
+      // The boss reads bigger and angrier.
+      ctx.translate(x, y);
+      ctx.scale(1.3, 1.3);
+      ctx.translate(-x, -y);
+      ctx.beginPath();
+      ctx.arc(x, y - 9, TANK_RADIUS + 7, 0, TAU);
+      ctx.strokeStyle = "#ff3b3b";
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
     if (isCurrent) {
       ctx.beginPath();
       ctx.arc(x, y - 8, TANK_RADIUS + 10, 0, TAU);
@@ -176,7 +208,22 @@ export class Tank {
     ctx.font = "700 11px 'Avenir Next', sans-serif";
     ctx.textAlign = "center";
     ctx.fillStyle = palette.glow;
-    ctx.fillText(this.name, x, y - 40);
+    const label = this.team >= 0 ? `${this.name} [${this.team === 0 ? "A" : "B"}]` : this.name;
+    ctx.fillText(this.isJuggernaut ? `☠ ${this.name}` : label, x, y - 40);
+
+    if (this.isVIP) {
+      ctx.fillStyle = "#ffd700";
+      ctx.beginPath();
+      ctx.moveTo(x - 8, y - 50);
+      ctx.lineTo(x - 8, y - 58);
+      ctx.lineTo(x - 4, y - 53);
+      ctx.lineTo(x, y - 59);
+      ctx.lineTo(x + 4, y - 53);
+      ctx.lineTo(x + 8, y - 58);
+      ctx.lineTo(x + 8, y - 50);
+      ctx.closePath();
+      ctx.fill();
+    }
 
     ctx.restore();
   }
@@ -259,6 +306,8 @@ export class Projectile {
   rollElapsed = 0;
   splitRequested = false;
   hasSplit = false;
+  isChild = false;   // sub-munition (cluster bomblet, MIRV warhead, airstrike bomb)
+  resting = false;   // grenade sitting still, waiting on its fuse
   trail: { x: number; y: number }[] = [];
 
   constructor(spawn: ProjectileSpawn) {

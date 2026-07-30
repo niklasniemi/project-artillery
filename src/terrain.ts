@@ -189,6 +189,24 @@ export class Terrain {
     ctx.restore();
   }
 
+  /** Remove a wide elliptical seam (Quake): collapses ground with little blast. */
+  carveEllipse(cx: number, cy: number, rx: number, ry: number): void {
+    this.stampEllipse(cx, cy, rx, ry, 0);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, TAU);
+    ctx.fill();
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.strokeStyle = "rgba(120, 80, 40, 0.6)";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx + 2, ry + 2, 0, 0, TAU);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   /** Add a protective terrain dome (Shielder): a ring of solid matter. */
   addDome(cx: number, cy: number, r: number): void {
     const thickness = 13;

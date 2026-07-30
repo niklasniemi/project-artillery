@@ -1,19 +1,33 @@
 export type WeaponBehavior =
   | "standard"   // explode on impact
-  | "splitter"   // splits into sub-shells on Space / at apex
+  | "splitter"   // splits into sub-shells on Space press
   | "digger"     // drills through terrain, carving a tunnel
   | "sniper"     // fast, wind-immune, flat arc, direct-hit damage
   | "bouncer"    // bounces off terrain, damage grows per bounce
   | "roller"     // rolls along the terrain surface after landing
-  | "shielder";  // builds a protective terrain dome, no damage
+  | "shielder"   // builds a protective terrain dome, no damage
+  | "cluster"    // impact spawns bomblets that scatter and explode
+  | "mirv"       // auto-splits at apex into falling warheads
+  | "airstrike"  // impact calls in a bombing run from the sky
+  | "napalm"     // impact scatters lingering fire blasts
+  | "twins"      // fires multiple shells in a tight fan
+  | "homing"     // steers toward the nearest enemy after arming
+  | "grenade"    // bounces, detonates on a fuse or tank contact
+  | "railstrike" // instant hitscan beam that pierces terrain
+  | "quake"      // collapses a wide seam of terrain, little blast
+  | "leech"      // damage dealt heals the shooter
+  | "teleport";  // relocates the shooter to the impact point
 
 export interface WeaponTierStats {
   damage: number;
-  radius: number;       // explosion / effect radius
-  count?: number;       // splitter sub-shell count
-  bounceBonus?: number; // bouncer: damage multiplier added per bounce
-  digTime?: number;     // digger: seconds of tunneling
-  label: string;        // tier flavor name
+  radius: number;        // explosion / effect radius
+  count?: number;        // sub-munition count (splitter/cluster/mirv/airstrike/napalm/twins)
+  bounceBonus?: number;  // bouncer: damage multiplier added per bounce
+  digTime?: number;      // digger: seconds of tunneling
+  fuse?: number;         // grenade: seconds until detonation
+  turnRate?: number;     // homing: steering rate, rad/s
+  pen?: number;          // railstrike: pixels of terrain penetration
+  label: string;         // tier flavor name
 }
 
 export interface WeaponDef {
@@ -108,6 +122,126 @@ export const WEAPONS: WeaponDef[] = [
       { label: "Shielder", damage: 0, radius: 70 },
       { label: "Bunker Dome", damage: 0, radius: 92 },
       { label: "Aegis Fortress", damage: 0, radius: 115 },
+    ],
+  },
+  {
+    id: "cluster", name: "Cluster", icon: "💥", behavior: "cluster",
+    desc: "Impact scatters bomblets across the area.",
+    speedMul: 1, gravityMul: 1, windMul: 1, trailColor: "#ffab3c",
+    tiers: [
+      { label: "Cluster Bomb", damage: 15, radius: 24, count: 4 },
+      { label: "Frag Storm", damage: 17, radius: 26, count: 6 },
+      { label: "Saturation Strike", damage: 19, radius: 28, count: 8 },
+    ],
+  },
+  {
+    id: "mirv", name: "MIRV", icon: "☄️", behavior: "mirv",
+    desc: "Splits at the top of its arc into raining warheads.",
+    speedMul: 1, gravityMul: 1, windMul: 1, trailColor: "#ff6b6b",
+    tiers: [
+      { label: "MIRV ×4", damage: 16, radius: 26, count: 4 },
+      { label: "MIRV ×5", damage: 18, radius: 28, count: 5 },
+      { label: "Meteor Shower ×6", damage: 20, radius: 30, count: 6 },
+    ],
+  },
+  {
+    id: "airstrike", name: "Airstrike", icon: "✈️", behavior: "airstrike",
+    desc: "Marks the target — bombers carpet the area from above.",
+    speedMul: 1.1, gravityMul: 0.9, windMul: 0.5, trailColor: "#e8e84d",
+    tiers: [
+      { label: "Airstrike", damage: 20, radius: 30, count: 4 },
+      { label: "Bombing Run", damage: 24, radius: 34, count: 5 },
+      { label: "Carpet Bombing", damage: 28, radius: 38, count: 6 },
+    ],
+  },
+  {
+    id: "napalm", name: "Napalm", icon: "🔥", behavior: "napalm",
+    desc: "Splashes burning fire that scorches the impact zone.",
+    speedMul: 0.95, gravityMul: 1, windMul: 1.1, trailColor: "#ff5a3c",
+    tiers: [
+      { label: "Napalm", damage: 9, radius: 26, count: 6 },
+      { label: "Firestorm", damage: 11, radius: 30, count: 8 },
+      { label: "Inferno", damage: 13, radius: 34, count: 10 },
+    ],
+  },
+  {
+    id: "nuke", name: "Nuke", icon: "☢️", behavior: "standard",
+    desc: "The big one. Slow, heavy, apocalyptic.",
+    speedMul: 0.72, gravityMul: 1.15, windMul: 1.3, trailColor: "#d0ff4d",
+    tiers: [
+      { label: "Tactical Nuke", damage: 70, radius: 105 },
+      { label: "Strategic Nuke", damage: 85, radius: 130 },
+      { label: "Tsar Bomba", damage: 105, radius: 155 },
+    ],
+  },
+  {
+    id: "twins", name: "Twins", icon: "🎭", behavior: "twins",
+    desc: "Fires a tight fan of shells in one shot.",
+    speedMul: 1, gravityMul: 1, windMul: 1, trailColor: "#4dffd2",
+    tiers: [
+      { label: "Twins ×2", damage: 26, radius: 30, count: 2 },
+      { label: "Triplets ×3", damage: 26, radius: 30, count: 3 },
+      { label: "Quadruplets ×4", damage: 27, radius: 32, count: 4 },
+    ],
+  },
+  {
+    id: "homing", name: "Homing", icon: "🚀", behavior: "homing",
+    desc: "Arms mid-flight and steers toward the nearest enemy.",
+    speedMul: 1.15, gravityMul: 0.3, windMul: 0, trailColor: "#ff4d6b",
+    tiers: [
+      { label: "Homing Missile", damage: 34, radius: 26, turnRate: 2.0 },
+      { label: "Seeker", damage: 42, radius: 30, turnRate: 2.7 },
+      { label: "Widowmaker", damage: 50, radius: 34, turnRate: 3.5 },
+    ],
+  },
+  {
+    id: "grenade", name: "Grenade", icon: "🍍", behavior: "grenade",
+    desc: "Bounces and rolls, then detonates on a timed fuse.",
+    speedMul: 0.95, gravityMul: 1.05, windMul: 0.9, trailColor: "#9df04d",
+    tiers: [
+      { label: "Grenade", damage: 40, radius: 34, fuse: 2.2 },
+      { label: "Impact Charge", damage: 50, radius: 40, fuse: 2.2 },
+      { label: "Demolition Core", damage: 62, radius: 46, fuse: 2.2 },
+    ],
+  },
+  {
+    id: "railstrike", name: "Railstrike", icon: "🎇", behavior: "railstrike",
+    desc: "Instant energy lance that pierces straight through terrain.",
+    speedMul: 1, gravityMul: 0, windMul: 0, trailColor: "#4de8ff",
+    tiers: [
+      { label: "Railstrike", damage: 45, radius: 8, pen: 140 },
+      { label: "Photon Lance", damage: 60, radius: 9, pen: 210 },
+      { label: "Singularity Beam", damage: 78, radius: 10, pen: 300 },
+    ],
+  },
+  {
+    id: "quake", name: "Quake", icon: "🌋", behavior: "quake",
+    desc: "Collapses a wide seam of ground. Gravity does the killing.",
+    speedMul: 0.9, gravityMul: 1.1, windMul: 1, trailColor: "#c9a06a",
+    tiers: [
+      { label: "Tremor", damage: 15, radius: 70 },
+      { label: "Earthquake", damage: 20, radius: 85 },
+      { label: "Tectonic Rip", damage: 25, radius: 100 },
+    ],
+  },
+  {
+    id: "leech", name: "Leech", icon: "🩸", behavior: "leech",
+    desc: "Damage dealt flows back to you as health.",
+    speedMul: 1, gravityMul: 1, windMul: 1, trailColor: "#f04da0",
+    tiers: [
+      { label: "Leech", damage: 30, radius: 34 },
+      { label: "Vampire Round", damage: 38, radius: 40 },
+      { label: "Soul Siphon", damage: 46, radius: 46 },
+    ],
+  },
+  {
+    id: "teleport", name: "Teleport", icon: "🕳️", behavior: "teleport",
+    desc: "No damage — relocates YOU to wherever it lands.",
+    speedMul: 1, gravityMul: 0.9, windMul: 0.6, trailColor: "#b44df0",
+    tiers: [
+      { label: "Blink", damage: 0, radius: 26 },
+      { label: "Phase Shift", damage: 12, radius: 26 },
+      { label: "Quantum Jump", damage: 24, radius: 26 },
     ],
   },
 ];
