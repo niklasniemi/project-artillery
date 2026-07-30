@@ -1,0 +1,16 @@
+{
+  "name": "project-artillery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AAA web-based turn-based tactical artillery game. Fully destructible terrain, zero grinding, in-match progression.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^6.0.0"
+  }
+}
