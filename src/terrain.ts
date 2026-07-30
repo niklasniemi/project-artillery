@@ -151,13 +151,13 @@ export class Terrain {
         const i = mi * 4;
         const noise = rand() * 14;
         if (depth < 3) {
-          // glowing surface lip
-          d[i] = 120; d[i + 1] = 240; d[i + 2] = 255; d[i + 3] = 255;
+          // Sunlit surface lip — warm, to sit with the horizon glow.
+          d[i] = 255; d[i + 1] = 208; d[i + 2] = 150; d[i + 3] = 255;
         } else {
           const t = Math.min(1, depth / 260);
-          d[i] = 46 - t * 22 + noise;
-          d[i + 1] = 38 - t * 20 + noise * 0.6;
-          d[i + 2] = 92 - t * 40 + noise;
+          d[i] = 44 - t * 20 + noise;
+          d[i + 1] = 40 - t * 20 + noise * 0.7;
+          d[i + 2] = 62 - t * 28 + noise * 0.9;
           d[i + 3] = 255;
         }
       }
@@ -226,8 +226,6 @@ export class Terrain {
     ctx.strokeStyle = "#38f0c8";
     ctx.lineWidth = thickness;
     ctx.lineCap = "round";
-    ctx.shadowColor = "#38f0c8";
-    ctx.shadowBlur = 10;
     ctx.beginPath();
     ctx.arc(cx, cy, r - thickness / 2, Math.PI, TAU);
     ctx.stroke();

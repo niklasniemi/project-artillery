@@ -5,6 +5,8 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 ## Features
 
 - **Online multiplayer** — Colyseus lockstep server, room codes, up to 8 players, ready-up lobby
+- **Trick-shot bonuses** — direct hits, long shots, bank shots, multi-kills, void kills and revenge kills all pay bonus XP
+- **Weapon bans** — the host can strike any ordnance out of the match from the armory grid
 - **Fully destructible terrain** — every explosion carves the map; tanks can be buried or dropped into the void
 - **All 20 weapons** with in-match Tier 1 → 3 upgrades: Shell, Mortar, Splitter, Digger, Sniper, Bouncer, Roller, Shielder, Cluster, MIRV, Airstrike, Napalm, Nuke, Twins, Homing, Grenade, Railstrike, Quake, Leech, Teleport
 - **4 game modes** — Deathmatch, Points (respawns + score), Juggernaut (one 3×-HP boss vs all), Assassination (2v2, protect your VIP ♛)
@@ -38,11 +40,25 @@ The repo ships a [render.yaml](render.yaml) blueprint. Either:
 1. **Blueprint**: [dashboard.render.com/blueprints](https://dashboard.render.com/blueprints) → New Blueprint Instance → pick this repo, or
 2. **Manual**: New Web Service → this repo → root dir `server`, build `npm install && npm run build`, start `npm start`.
 
-Then build the client with the server's URL and host it anywhere static (Vercel):
+### Pointing the deployed client at the deployed server
 
-```bash
-VITE_SERVER_URL=wss://your-service.onrender.com npm run build
-```
+**This is the one piece deploying-from-Git alone does not wire up.** A page served
+over HTTPS cannot open a `ws://localhost` socket, so the client needs to be told
+where the relay lives. Either:
+
+1. **Vercel env var (recommended).** In the Vercel project → Settings → Environment
+   Variables add `VITE_SERVER_URL = wss://your-service.onrender.com`, then redeploy.
+   Vite inlines it at build time.
+2. **In-game field, no rebuild.** Open **§2 Network Op** and paste the Render host
+   into **Relay Server**. It is normalized (`your-service.onrender.com` →
+   `wss://your-service.onrender.com`) and remembered in `localStorage`.
+3. **Query string, for a one-off test.** `?server=wss://your-service.onrender.com`.
+
+If none is set and the page isn't on localhost, the Network panel says so
+explicitly rather than hanging on a connection that can never succeed.
+
+Note: Render's free tier sleeps when idle — the first room you open after a quiet
+spell can take ~30s to spin up.
 
 ### Multiplayer architecture
 
@@ -57,7 +73,9 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | W / S or mouse drag distance | Power |
 | Space / click | Fire (hold nothing — instant) |
 | Space mid-air | Trigger Splitter split |
-| 1–0 / mouse wheel / click | Select weapon (wheel cycles all 20) |
+| 1–0 / mouse wheel / click | Select weapon (wheel cycles all 20, skipping bans) |
+| M | Mute audio |
+| F3 | Frame-rate / quality readout |
 | U | Open upgrade panel (when you have points) |
 
 ## Roadmap
@@ -65,7 +83,29 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 - **Phase 1 — Prototype** ✅ terrain generation + destruction, aiming, weapons, local play
 - **Phase 2 — Multiplayer** ✅ Colyseus lockstep server (Render-ready), room-code lobbies, up to 8 players
 - **Phase 3 — Full arsenal** ✅ all 20 weapons with tier upgrades, Points / Juggernaut / Assassination modes
-- **Phase 4 — AAA polish** ⏳ VFX pass, 60 FPS lock across browsers, audio pass, weapon bans, simultaneous-turn mode, trick-shot XP bonuses
+- **Phase 4 — AAA polish** ✅ art direction overhaul, VFX pass, layered audio, 60 FPS work, weapon bans, trick-shot XP
+- **Next** ⏳ simultaneous-turn mode, spectator view, per-weapon balance pass
+
+## Art direction
+
+The interface is built as an **ordnance field manual** rather than a typical game
+menu: a printed document with a masthead rail, section tabs, and machined cut
+corners. Bone stock and ink, hazard orange for anything live, acid yellow for
+readouts. Type is condensed stencil for display and monospace for instrumentation;
+nothing is rounded and nothing glows. Native `<select>` and `<input type=range>`
+controls are replaced with segmented switch banks and notched dials so the whole
+surface reads as equipment. In-game, the HUD continues the same system, so the
+chrome stays legible against the world without competing with it.
+
+## Performance notes
+
+The renderer holds frame budget through a few deliberate choices: `shadowBlur` is
+avoided entirely (it was the single largest cost), glow particles are blitted from
+per-colour cached sprites instead of building arc paths, projectile trails draw as
+two polylines rather than one stroke per segment, and the vignette is pre-rasterized.
+Particle spawn counts scale from a rolling frame-time average, so a heavy volley
+sheds effects instead of dropping frames — gameplay is never affected, only VFX
+density.
 
 ## Stack
 

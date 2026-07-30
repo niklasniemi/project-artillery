@@ -2,8 +2,61 @@ import { Client, Room } from "colyseus.js";
 import { MatchSettings, LobbyView } from "./ui";
 import { FireMsg, SplitMsg, Snapshot } from "./game";
 
-export const SERVER_URL: string =
-  (import.meta.env.VITE_SERVER_URL as string | undefined) || "ws://localhost:2567";
+const SERVER_KEY = "pa-server-url";
+
+/** Accepts bare hosts and http(s):// forms; returns a ws(s):// origin. */
+export function normalizeServerUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (/^wss?:\/\//i.test(trimmed)) return trimmed;
+  if (/^https:\/\//i.test(trimmed)) return `wss://${trimmed.slice(8)}`;
+  if (/^http:\/\//i.test(trimmed)) return `ws://${trimmed.slice(7)}`;
+  // Bare host: assume TLS unless it is clearly local.
+  const local = /^(localhost|127\.0\.0\.1)(:|$)/i.test(trimmed);
+  return `${local ? "ws" : "wss"}://${trimmed}`;
+}
+
+export function storedServerUrl(): string {
+  try {
+    return localStorage.getItem(SERVER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setStoredServerUrl(raw: string): string {
+  const url = normalizeServerUrl(raw);
+  try {
+    if (url) localStorage.setItem(SERVER_KEY, url);
+    else localStorage.removeItem(SERVER_KEY);
+  } catch {
+    /* private mode — fall through to the in-memory value */
+  }
+  return url;
+}
+
+/**
+ * Where to reach the Colyseus server, most specific source first:
+ *   1. ?server= query param (one-off testing)
+ *   2. localStorage, set from the NETWORK panel (no rebuild needed)
+ *   3. VITE_SERVER_URL baked in at build time (the deploy path)
+ *   4. localhost, but only when the page itself is local
+ * A page served over HTTPS can never reach ws://localhost, so returning ""
+ * there lets the UI explain the problem instead of failing silently.
+ */
+export function resolveServerUrl(): string {
+  const param = new URLSearchParams(location.search).get("server");
+  if (param) return normalizeServerUrl(param);
+
+  const stored = storedServerUrl();
+  if (stored) return stored;
+
+  const built = (import.meta.env.VITE_SERVER_URL as string | undefined) ?? "";
+  if (built) return normalizeServerUrl(built);
+
+  const isLocalPage = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(location.hostname);
+  return isLocalPage ? "ws://localhost:2567" : "";
+}
 
 export interface StartPayload {
   seed: number;
@@ -24,9 +77,26 @@ interface LobbyMsg {
  * order, and timeouts; every client runs the identical seeded simulation.
  */
 export class Net {
-  private client = new Client(SERVER_URL);
+  private client: Client | null = null;
+  private clientUrl = "";
   room: Room | null = null;
   lastLobby: LobbyView | null = null;
+
+  /** Built lazily so a server URL entered in the UI takes effect immediately. */
+  private clientFor(): Client {
+    const url = resolveServerUrl();
+    if (!url) {
+      throw new Error(
+        "No multiplayer server configured. Paste your server URL in the SERVER field " +
+        "(or set VITE_SERVER_URL at build time).",
+      );
+    }
+    if (!this.client || this.clientUrl !== url) {
+      this.client = new Client(url);
+      this.clientUrl = url;
+    }
+    return this.client;
+  }
 
   onLobby: (view: LobbyView) => void = () => {};
   onStart: (payload: StartPayload) => void = () => {};
@@ -44,12 +114,12 @@ export class Net {
   }
 
   async create(name: string, settings: MatchSettings): Promise<void> {
-    this.room = await this.client.create("artillery", { name, settings });
+    this.room = await this.clientFor().create("artillery", { name, settings });
     this.wire();
   }
 
   async join(name: string, code: string): Promise<void> {
-    this.room = await this.client.joinById(code.trim(), { name });
+    this.room = await this.clientFor().joinById(code.trim(), { name });
     this.wire();
   }
 

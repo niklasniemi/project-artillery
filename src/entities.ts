@@ -45,6 +45,7 @@ export class Tank {
   isJuggernaut = false;
   kills = 0;
   turnsTaken = 0;
+  lastDamagedBy: Tank | null = null;
 
   // In-match progression (resets every game — the whole point).
   xp = 0;
@@ -183,14 +184,20 @@ export class Tank {
     ctx.roundRect(x - TANK_RADIUS, y - 7, TANK_RADIUS * 2, 8, 4);
     ctx.fill();
 
-    // Hull
+    // Hull. A translucent outline stands in for shadowBlur, which is by far
+    // the most expensive operation in Canvas 2D at this call volume.
+    if (isCurrent) {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = palette.glow;
+      ctx.beginPath();
+      ctx.roundRect(x - TANK_RADIUS, y - 16, TANK_RADIUS * 2, 13, 5);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     ctx.fillStyle = palette.primary;
-    ctx.shadowColor = palette.glow;
-    ctx.shadowBlur = isCurrent ? 14 : 6;
     ctx.beginPath();
     ctx.roundRect(x - TANK_RADIUS + 2, y - 14, TANK_RADIUS * 2 - 4, 9, 4);
     ctx.fill();
-    ctx.shadowBlur = 0;
 
     // Turret cap
     ctx.fillStyle = palette.primary;
@@ -321,25 +328,41 @@ export class Projectile {
   draw(ctx: CanvasRenderingContext2D): void {
     if (!this.alive) return;
     ctx.save();
-    // Trail
-    if (this.trail.length > 1) {
+    // Trail: two polylines (faint tail, brighter head) instead of one stroke
+    // per segment — same look, a fraction of the draw calls.
+    const n = this.trail.length;
+    if (n > 1) {
       ctx.strokeStyle = this.def.trailColor;
-      ctx.lineWidth = 2;
       ctx.lineCap = "round";
-      for (let i = 1; i < this.trail.length; i++) {
-        ctx.globalAlpha = (i / this.trail.length) * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(this.trail[i - 1].x, this.trail[i - 1].y);
-        ctx.lineTo(this.trail[i].x, this.trail[i].y);
-        ctx.stroke();
-      }
+      ctx.lineJoin = "round";
+
+      ctx.globalAlpha = 0.22;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(this.trail[0].x, this.trail[0].y);
+      for (let i = 1; i < n; i++) ctx.lineTo(this.trail[i].x, this.trail[i].y);
+      ctx.stroke();
+
+      const headFrom = Math.max(0, n - 8);
+      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(this.trail[headFrom].x, this.trail[headFrom].y);
+      for (let i = headFrom + 1; i < n; i++) ctx.lineTo(this.trail[i].x, this.trail[i].y);
+      ctx.stroke();
       ctx.globalAlpha = 1;
     }
+
+    const r = this.rolling ? 7 : 4.5;
+    ctx.globalCompositeOperation = "lighter";
     ctx.fillStyle = this.def.trailColor;
-    ctx.shadowColor = this.def.trailColor;
-    ctx.shadowBlur = 12;
+    ctx.globalAlpha = 0.35;
     ctx.beginPath();
-    ctx.arc(this.x, this.y, this.rolling ? 7 : 4.5, 0, TAU);
+    ctx.arc(this.x, this.y, r * 2.4, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, r, 0, TAU);
     ctx.fill();
     ctx.restore();
   }

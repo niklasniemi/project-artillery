@@ -41,11 +41,15 @@ function simulateImpact(
  * Sample candidate shots and keep the one landing closest to the chosen
  * target, then blur the result so the AI stays beatable.
  */
-export function planShot(shooter: Tank, tanks: Tank[], terrain: Terrain, wind: number): AiPlan {
+export function planShot(
+  shooter: Tank, tanks: Tank[], terrain: Terrain, wind: number,
+  banned: ReadonlySet<number> = new Set(),
+): AiPlan {
   const enemies = tanks.filter((t) => t.alive && t.isEnemyOf(shooter));
   if (enemies.length === 0) {
     // Everyone's dead or friendly (points-mode respawn gap) — fire far off to the side.
-    return { weaponIndex: 0, angle: shooter.x < 800 ? -Math.PI / 4 : -Math.PI * 0.75, power: 100 };
+    const safe = Math.max(0, WEAPONS.findIndex((_, i) => !banned.has(i)));
+    return { weaponIndex: safe, angle: shooter.x < 800 ? -Math.PI / 4 : -Math.PI * 0.75, power: 100 };
   }
   // Prefer wounded targets, with a distance tiebreak. VIPs are priority prey.
   let target = enemies[0];
@@ -58,8 +62,13 @@ export function planShot(shooter: Tank, tanks: Tank[], terrain: Terrain, wind: n
   // AI sticks to predictable-arc weapons; nuke comes out for wounded prey.
   const pool = ["shell", "shell", "mortar", "sniper", "cluster"];
   if (target.hp < 45) pool.push("nuke");
-  const chosenId = pick(pool);
-  const weaponIndex = WEAPONS.findIndex((w) => w.id === chosenId);
+  const allowed = pool
+    .map((id) => WEAPONS.findIndex((w) => w.id === id))
+    .filter((i) => i >= 0 && !banned.has(i));
+  // If the host banned everything the AI likes, spread across whatever is
+  // left rather than hammering the same fallback gun every turn.
+  const fallback = WEAPONS.map((_, i) => i).filter((i) => !banned.has(i));
+  const weaponIndex = allowed.length ? pick(allowed) : (fallback.length ? pick(fallback) : 0);
   const def = WEAPONS[weaponIndex];
 
   const startX = shooter.x;

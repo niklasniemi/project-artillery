@@ -3,6 +3,7 @@ import { WEAPONS, XP_LEVELS } from "./weapons";
 import { TerrainType } from "./terrain";
 import { formatDeg } from "./util";
 import { sfx } from "./audio";
+import { storedServerUrl, setStoredServerUrl, resolveServerUrl } from "./net";
 
 export type GameMode = "deathmatch" | "points" | "juggernaut" | "assassination";
 
@@ -16,6 +17,7 @@ export interface MatchSettings {
   turnSeconds: number; // 0 = no timer
   terrainType: TerrainType;
   crates: boolean;
+  bannedWeapons: number[];
 }
 
 export interface LobbyPlayer {
@@ -39,7 +41,6 @@ interface UICallbacks {
   onUpgrade: (weaponIndex: number) => void;
   onStart: (settings: MatchSettings) => void;
   onPlayAgain: () => void;
-  // Online
   onCreateRoom: (name: string, settings: MatchSettings) => void;
   onJoinRoom: (name: string, code: string) => void;
   onReadyToggle: () => void;
@@ -47,14 +48,78 @@ interface UICallbacks {
   onLeaveRoom: () => void;
 }
 
-const MODE_DESCRIPTIONS: Record<GameMode, string> = {
-  deathmatch: "Last tank standing wins.",
-  points: "Respawns on. Most damage + kills after the round limit wins.",
-  juggernaut: "One boss tank with triple HP and brutal damage vs everyone.",
-  assassination: "2v2 teams. Kill the enemy VIP ♛ — protect your own.",
-};
+const MODES: { id: GameMode; num: string; name: string; brief: string }[] = [
+  { id: "deathmatch", num: "01", name: "Deathmatch", brief: "Last tank rolling takes the field." },
+  { id: "points", num: "02", name: "Points", brief: "Respawns on. Damage and kills score." },
+  { id: "juggernaut", num: "03", name: "Juggernaut", brief: "One armoured boss against all guns." },
+  { id: "assassination", num: "04", name: "Assassination", brief: "2v2. Kill their VIP, shield yours." },
+];
 
-/** DOM-based HUD + menus. The canvas stays purely for the game world. */
+const PALETTE_HEX = ["#28c7f0", "#f04da0", "#9df04d", "#f0a52d", "#b44df0", "#4df0b4", "#f0654d", "#e8e8f0"];
+
+interface Opt { value: string; label: string }
+
+/** Segmented switch bank — replaces a native <select>. */
+function bank(id: string, label: string, opts: Opt[], selected: string): string {
+  const cells = opts.map((o) =>
+    `<button type="button" class="bank-opt" data-val="${o.value}" aria-pressed="${o.value === selected}">${o.label}</button>`,
+  ).join("");
+  return `
+    <div class="bank" data-bank="${id}" data-value="${selected}">
+      <span class="label">${label}</span>
+      <div class="bank-opts">${cells}</div>
+    </div>`;
+}
+
+/** Notched dial — a range input dressed as an instrument. */
+function dial(id: string, label: string, min: number, max: number, step: number, value: number): string {
+  const ticks = Array.from({ length: 21 }, () => "<i></i>").join("");
+  return `
+    <div class="dial" data-dial="${id}">
+      <span class="label">${label}</span>
+      <div class="track-wrap">
+        <div class="ticks">${ticks}</div>
+        <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${value}" />
+      </div>
+      <span class="readout" data-readout>${value}</span>
+    </div>`;
+}
+
+function opsGrid(selected: GameMode): string {
+  return `<div class="ops" data-ops>` + MODES.map((m) => `
+    <button type="button" class="op" data-mode="${m.id}" aria-pressed="${m.id === selected}">
+      <span class="num">${m.num}</span>
+      <span class="nm">${m.name}</span>
+      <span class="br">${m.brief}</span>
+    </button>`).join("") + `</div>`;
+}
+
+function armoryGrid(): string {
+  return `<div class="armory" data-armory>` + WEAPONS.map((w, i) =>
+    `<button type="button" class="arm" data-idx="${i}" title="${w.name} — click to ban">${w.icon}</button>`,
+  ).join("") + `</div>`;
+}
+
+/** Ballistic-arc decoration for the masthead rail. */
+function arcSvg(): string {
+  const pts: string[] = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40;
+    const x = 20 + t * 250;
+    const y = 210 - (Math.sin(t * Math.PI) * 150 - t * 18);
+    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  }
+  const grid = Array.from({ length: 6 }, (_, i) =>
+    `<line class="arc-grid" x1="0" y1="${40 + i * 34}" x2="320" y2="${40 + i * 34}"/>`).join("");
+  return `
+    <svg class="rail-arc" viewBox="0 0 320 260" aria-hidden="true">
+      ${grid}
+      <polyline class="arc-path" points="${pts.join(" ")}"/>
+      <circle class="arc-dot" cx="20" cy="210" r="3"/>
+      <circle class="arc-dot" cx="270" cy="192" r="3"/>
+    </svg>`;
+}
+
 export class UI {
   private hud = document.getElementById("hud")!;
   private menu = document.getElementById("menu")!;
@@ -66,185 +131,222 @@ export class UI {
   private powerVal!: HTMLElement;
   private powerFill!: HTMLElement;
   private fuelFill!: HTMLElement;
+  private fuelVal!: HTMLElement;
   private weaponSlots: HTMLElement[] = [];
   private weaponNameEl!: HTMLElement;
   private fireBtn!: HTMLButtonElement;
   private xpFill!: HTMLElement;
   private xpLvl!: HTMLElement;
   private upgradeHint!: HTMLElement;
+  private awardsEl!: HTMLElement;
+  private fpsEl!: HTMLElement;
   private upgradeOverlay: HTMLElement | null = null;
   private lobbyOverlay: HTMLElement | null = null;
+  private banned = new Set<number>();
 
   constructor(private cb: UICallbacks) {}
 
-  // ---------- Main menu ----------
+  // ---------- Control-surface helpers ----------
 
-  private settingsGridHtml(): string {
-    return `
-      <div class="settings-grid">
-        <div class="setting">
-          <label>GAME MODE</label>
-          <select id="s-mode">
-            <option value="deathmatch">Deathmatch</option>
-            <option value="points">Points</option>
-            <option value="juggernaut">Juggernaut</option>
-            <option value="assassination">Assassination</option>
-          </select>
-        </div>
-        <div class="setting">
-          <label>TERRAIN</label>
-          <select id="s-terrain">
-            <option value="hilly">Hilly</option>
-            <option value="flat">Flat</option>
-            <option value="cavern">Cavern</option>
-            <option value="islands">Floating Islands</option>
-          </select>
-        </div>
-        <div class="setting">
-          <label>WIND</label>
-          <select id="s-wind">
-            <option value="realistic">Realistic</option>
-            <option value="none">None</option>
-            <option value="low">Low</option>
-            <option value="chaotic">Chaotic</option>
-          </select>
-        </div>
-        <div class="setting">
-          <label>TURN TIMER</label>
-          <select id="s-timer">
-            <option value="30">30 seconds</option>
-            <option value="15">15 seconds</option>
-            <option value="45">45 seconds</option>
-            <option value="0">No timer</option>
-          </select>
-        </div>
-        <div class="setting">
-          <label>STARTING HP <span class="range-val" id="s-hp-val">100</span></label>
-          <input type="range" id="s-hp" min="50" max="200" step="10" value="100" />
-        </div>
-        <div class="setting">
-          <label>STARTING FUEL <span class="range-val" id="s-fuel-val">100</span></label>
-          <input type="range" id="s-fuel" min="0" max="250" step="10" value="100" />
-        </div>
-        <div class="setting">
-          <label>CRATE DROPS</label>
-          <select id="s-crates">
-            <option value="on">On</option>
-            <option value="off">Off</option>
-          </select>
-        </div>
-        <div class="setting">
-          <label>ROUNDS (POINTS MODE)</label>
-          <select id="s-rounds">
-            <option value="8">8 per tank</option>
-            <option value="5">5 per tank</option>
-            <option value="12">12 per tank</option>
-          </select>
-        </div>
-      </div>
-      <div class="mode-desc" id="s-mode-desc">${MODE_DESCRIPTIONS.deathmatch}</div>`;
+  private wireBanks(root: HTMLElement): void {
+    root.querySelectorAll<HTMLElement>("[data-bank]").forEach((el) => {
+      el.querySelectorAll<HTMLButtonElement>(".bank-opt").forEach((btn) => {
+        btn.onclick = () => {
+          el.dataset.value = btn.dataset.val!;
+          el.querySelectorAll(".bank-opt").forEach((b) =>
+            b.setAttribute("aria-pressed", String(b === btn)));
+          sfx.ui();
+          this.syncConditionalRows(root);
+        };
+      });
+    });
+    root.querySelectorAll<HTMLElement>("[data-dial]").forEach((el) => {
+      const input = el.querySelector<HTMLInputElement>("input")!;
+      const out = el.querySelector<HTMLElement>("[data-readout]")!;
+      input.oninput = () => (out.textContent = input.value);
+    });
+    root.querySelectorAll<HTMLElement>("[data-ops]").forEach((el) => {
+      el.querySelectorAll<HTMLButtonElement>(".op").forEach((btn) => {
+        btn.onclick = () => {
+          el.dataset.mode = btn.dataset.mode!;
+          el.querySelectorAll(".op").forEach((b) =>
+            b.setAttribute("aria-pressed", String(b === btn)));
+          sfx.ui();
+          this.syncConditionalRows(root);
+        };
+      });
+      el.dataset.mode = el.dataset.mode || "deathmatch";
+    });
+    root.querySelectorAll<HTMLElement>("[data-armory]").forEach((el) => {
+      el.querySelectorAll<HTMLButtonElement>(".arm").forEach((btn) => {
+        const idx = parseInt(btn.dataset.idx!, 10);
+        btn.classList.toggle("banned", this.banned.has(idx));
+        btn.onclick = () => {
+          if (this.banned.has(idx)) this.banned.delete(idx);
+          else if (this.banned.size < WEAPONS.length - 1) this.banned.add(idx);
+          btn.classList.toggle("banned", this.banned.has(idx));
+          sfx.ui();
+        };
+      });
+    });
+    this.syncConditionalRows(root);
+  }
+
+  /** Rounds only matters in Points — grey it out elsewhere. */
+  private syncConditionalRows(root: HTMLElement): void {
+    const mode = root.querySelector<HTMLElement>("[data-ops]")?.dataset.mode;
+    const rounds = root.querySelector<HTMLElement>('[data-bank="rounds"]');
+    if (rounds) rounds.classList.toggle("disabled", mode !== "points");
   }
 
   private readSettings(root: HTMLElement, players: MatchSettings["players"]): MatchSettings {
+    const bankVal = (id: string): string =>
+      root.querySelector<HTMLElement>(`[data-bank="${id}"]`)!.dataset.value!;
+    const dialVal = (id: string): number =>
+      parseInt(root.querySelector<HTMLInputElement>(`#${id}`)!.value, 10);
     return {
       players,
-      mode: root.querySelector<HTMLSelectElement>("#s-mode")!.value as GameMode,
-      rounds: parseInt(root.querySelector<HTMLSelectElement>("#s-rounds")!.value, 10),
-      startHp: parseInt(root.querySelector<HTMLInputElement>("#s-hp")!.value, 10),
-      startFuel: parseInt(root.querySelector<HTMLInputElement>("#s-fuel")!.value, 10),
-      windMode: root.querySelector<HTMLSelectElement>("#s-wind")!.value as MatchSettings["windMode"],
-      turnSeconds: parseInt(root.querySelector<HTMLSelectElement>("#s-timer")!.value, 10),
-      terrainType: root.querySelector<HTMLSelectElement>("#s-terrain")!.value as TerrainType,
-      crates: root.querySelector<HTMLSelectElement>("#s-crates")!.value === "on",
+      mode: (root.querySelector<HTMLElement>("[data-ops]")!.dataset.mode ?? "deathmatch") as GameMode,
+      rounds: parseInt(bankVal("rounds"), 10),
+      startHp: dialVal(`${root.id}-hp`),
+      startFuel: dialVal(`${root.id}-fuel`),
+      windMode: bankVal("wind") as MatchSettings["windMode"],
+      turnSeconds: parseInt(bankVal("timer"), 10),
+      terrainType: bankVal("terrain") as TerrainType,
+      crates: bankVal("crates") === "on",
+      bannedWeapons: [...this.banned],
     };
   }
 
-  private wireSettingsGrid(root: HTMLElement): void {
-    const hp = root.querySelector<HTMLInputElement>("#s-hp")!;
-    const fuel = root.querySelector<HTMLInputElement>("#s-fuel")!;
-    hp.oninput = () => (root.querySelector("#s-hp-val")!.textContent = hp.value);
-    fuel.oninput = () => (root.querySelector("#s-fuel-val")!.textContent = fuel.value);
-    const mode = root.querySelector<HTMLSelectElement>("#s-mode")!;
-    mode.onchange = () => {
-      root.querySelector("#s-mode-desc")!.textContent = MODE_DESCRIPTIONS[mode.value as GameMode];
-    };
+  private controlSurface(prefix: string): string {
+    return `
+      ${opsGrid("deathmatch")}
+      ${bank("terrain", "Terrain", [
+        { value: "hilly", label: "Hilly" },
+        { value: "flat", label: "Flat" },
+        { value: "cavern", label: "Cavern" },
+        { value: "islands", label: "Islands" },
+      ], "hilly")}
+      ${bank("wind", "Wind", [
+        { value: "none", label: "None" },
+        { value: "low", label: "Low" },
+        { value: "realistic", label: "Real" },
+        { value: "chaotic", label: "Chaos" },
+      ], "realistic")}
+      ${bank("timer", "Turn Clock", [
+        { value: "15", label: "15s" },
+        { value: "30", label: "30s" },
+        { value: "45", label: "45s" },
+        { value: "0", label: "Off" },
+      ], "30")}
+      ${bank("crates", "Airdrops", [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+      ], "on")}
+      ${bank("rounds", "Rounds", [
+        { value: "5", label: "5" },
+        { value: "8", label: "8" },
+        { value: "12", label: "12" },
+      ], "8")}
+      ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
+      ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}
+      <div class="section-break"><span>Armory · click to ban</span></div>
+      ${armoryGrid()}`;
   }
+
+  // ---------- Main menu ----------
 
   showMenu(): void {
-    const savedName = localStorage.getItem("pa-name") ?? `Pilot-${Math.floor(Math.random() * 900 + 100)}`;
+    const savedName = localStorage.getItem("pa-name") ?? `Gunner-${Math.floor(Math.random() * 900 + 100)}`;
+    const savedServer = storedServerUrl();
     this.menu.innerHTML = `
-      <div class="overlay">
-        <div class="panel wide">
-          <h1>PROJECT ARTILLERY</h1>
-          <div class="subtitle">Turn-based tactical artillery · zero grinding · all skill</div>
-          <div class="tabs">
-            <button class="tab-btn active" data-tab="local">LOCAL PLAY</button>
-            <button class="tab-btn" data-tab="online">ONLINE</button>
+      <div class="doc">
+        <aside class="doc-rail">
+          <div class="stamp">MK·IV / LIVE FIRE</div>
+          <h1 class="masthead">Project<em>Artillery</em></h1>
+          <div class="rail-meta">
+            <div>DOC. <b>PA-2050/ORD</b></div>
+            <div>FIRE CONTROL MANUAL</div>
+            <div>ISSUE <b>04</b> · UNRESTRICTED</div>
           </div>
-          <div class="tab-pane" id="tab-local">
-            <div class="settings-grid" style="margin-bottom:0">
-              <div class="setting">
-                <label>MATCH SETUP</label>
-                <select id="s-players">
-                  <option value="1v1ai">You vs AI</option>
-                  <option value="1v2ai">You vs 2 AI</option>
-                  <option value="1v3ai">You vs 3 AI</option>
-                  <option value="2p">2P Hotseat</option>
-                  <option value="3p">3P Hotseat</option>
-                  <option value="4p">4P Hotseat</option>
-                </select>
-              </div>
+          ${arcSvg()}
+          <div class="rail-foot">NO RANKS · NO GRIND<br/>EVERY GUN UNLOCKED</div>
+        </aside>
+        <main class="doc-body">
+          <nav class="folder-tabs">
+            <button class="ftab active" data-tab="local">§1 · Local Range</button>
+            <button class="ftab" data-tab="online">§2 · Network Op</button>
+          </nav>
+          <div class="sheet" id="local">
+            <div class="sheet-head">
+              <h2>Range Configuration</h2>
+              <span class="hint">Host sets the rules</span>
             </div>
-            ${this.settingsGridHtml()}
-            <button class="btn primary" id="s-start">DEPLOY ▸</button>
+            ${bank("roster", "Roster", [
+              { value: "1v1ai", label: "1 Bot" },
+              { value: "1v2ai", label: "2 Bots" },
+              { value: "1v3ai", label: "3 Bots" },
+              { value: "2p", label: "2P Seat" },
+              { value: "3p", label: "3P Seat" },
+              { value: "4p", label: "4P Seat" },
+            ], "1v1ai")}
+            ${this.controlSurface("local")}
+            <button class="btn fire-key" id="s-start">Commence Fire ▸</button>
           </div>
-          <div class="tab-pane" id="tab-online" style="display:none">
-            <div class="settings-grid" style="margin-bottom:14px">
-              <div class="setting">
-                <label>CALLSIGN</label>
-                <input type="text" id="o-name" maxlength="14" value="${savedName}" />
-              </div>
-              <div class="setting">
-                <label>JOIN CODE</label>
-                <input type="text" id="o-code" maxlength="12" placeholder="ROOM CODE" />
-              </div>
+          <div class="sheet" id="online" style="display:none">
+            <div class="sheet-head">
+              <h2>Network Operation</h2>
+              <span class="hint">Up to 8 guns</span>
             </div>
-            <div class="row-buttons">
-              <button class="btn" id="o-join">JOIN ROOM ▸</button>
+            <div class="field">
+              <span class="label">Callsign</span>
+              <input type="text" id="o-name" maxlength="14" value="${savedName}" />
             </div>
-            <div class="divider">— or host a new room with these settings —</div>
-            ${this.settingsGridHtml()}
-            <button class="btn primary" id="o-create">CREATE ROOM ▸</button>
+            <div class="field">
+              <span class="label">Relay Server</span>
+              <input type="text" id="o-server" placeholder="your-service.onrender.com" value="${savedServer}" />
+            </div>
+            <div class="note" id="o-serverhint"></div>
+            <div class="field">
+              <span class="label">Room Code</span>
+              <input type="text" id="o-code" maxlength="14" placeholder="paste code to join" />
+            </div>
+            <div class="row-buttons" style="margin-top:14px">
+              <button class="btn" id="o-join">Join Room ▸</button>
+            </div>
+            <div class="section-break"><span>or open a new room</span></div>
+            ${this.controlSurface("online")}
+            <button class="btn fire-key" id="o-create">Open Room ▸</button>
             <div class="net-status" id="o-status"></div>
           </div>
-        </div>
+        </main>
       </div>`;
 
-    // Tab switching
-    this.menu.querySelectorAll<HTMLButtonElement>(".tab-btn").forEach((btn) => {
+    const localPane = this.menu.querySelector<HTMLElement>("#local")!;
+    const onlinePane = this.menu.querySelector<HTMLElement>("#online")!;
+
+    this.menu.querySelectorAll<HTMLButtonElement>(".ftab").forEach((btn) => {
       btn.onclick = () => {
         sfx.unlock(); sfx.ui();
-        this.menu.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        this.menu.querySelectorAll(".ftab").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
-        this.menu.querySelector<HTMLElement>("#tab-local")!.style.display = btn.dataset.tab === "local" ? "" : "none";
-        this.menu.querySelector<HTMLElement>("#tab-online")!.style.display = btn.dataset.tab === "online" ? "" : "none";
+        localPane.style.display = btn.dataset.tab === "local" ? "" : "none";
+        onlinePane.style.display = btn.dataset.tab === "online" ? "" : "none";
       };
     });
 
-    const localPane = this.menu.querySelector<HTMLElement>("#tab-local")!;
-    const onlinePane = this.menu.querySelector<HTMLElement>("#tab-online")!;
-    this.wireSettingsGrid(localPane);
-    this.wireSettingsGrid(onlinePane);
+    this.wireBanks(localPane);
+    this.wireBanks(onlinePane);
 
     this.menu.querySelector<HTMLButtonElement>("#s-start")!.onclick = () => {
       sfx.unlock(); sfx.ui();
-      const modeSel = this.menu.querySelector<HTMLSelectElement>("#s-players")!.value;
+      const roster = localPane.querySelector<HTMLElement>('[data-bank="roster"]')!.dataset.value!;
       const players: MatchSettings["players"] = [{ name: "Player 1", isAI: false }];
-      if (modeSel === "1v1ai") players.push({ name: "Vector", isAI: true });
-      else if (modeSel === "1v2ai") players.push({ name: "Vector", isAI: true }, { name: "Torque", isAI: true });
-      else if (modeSel === "1v3ai") players.push({ name: "Vector", isAI: true }, { name: "Torque", isAI: true }, { name: "Parabola", isAI: true });
+      if (roster === "1v1ai") players.push({ name: "Vector", isAI: true });
+      else if (roster === "1v2ai") players.push({ name: "Vector", isAI: true }, { name: "Torque", isAI: true });
+      else if (roster === "1v3ai") players.push({ name: "Vector", isAI: true }, { name: "Torque", isAI: true }, { name: "Parabola", isAI: true });
       else {
-        const humans = parseInt(modeSel, 10);
+        const humans = parseInt(roster, 10);
         for (let i = 2; i <= humans; i++) players.push({ name: `Player ${i}`, isAI: false });
       }
       const settings = this.readSettings(localPane, players);
@@ -252,14 +354,30 @@ export class UI {
       this.cb.onStart(settings);
     };
 
+    const serverInput = this.menu.querySelector<HTMLInputElement>("#o-server")!;
+    const serverHint = this.menu.querySelector<HTMLElement>("#o-serverhint")!;
+    const refreshHint = (): void => {
+      const url = resolveServerUrl();
+      serverHint.textContent = url
+        ? `Relay: ${url}`
+        : "No relay set. Paste your Render service host above, or build with VITE_SERVER_URL.";
+    };
+    serverInput.onchange = () => {
+      const normalized = setStoredServerUrl(serverInput.value);
+      serverInput.value = normalized;
+      refreshHint();
+    };
+    refreshHint();
+
     const nameOf = (): string => {
-      const name = (this.menu.querySelector<HTMLInputElement>("#o-name")!.value.trim() || "Pilot").slice(0, 14);
+      const name = (this.menu.querySelector<HTMLInputElement>("#o-name")!.value.trim() || "Gunner").slice(0, 14);
       localStorage.setItem("pa-name", name);
+      setStoredServerUrl(serverInput.value);
       return name;
     };
     this.menu.querySelector<HTMLButtonElement>("#o-create")!.onclick = () => {
       sfx.unlock(); sfx.ui();
-      this.netStatus("Creating room…");
+      this.netStatus("Opening room…");
       this.cb.onCreateRoom(nameOf(), this.readSettings(onlinePane, []));
     };
     this.menu.querySelector<HTMLButtonElement>("#o-join")!.onclick = () => {
@@ -271,9 +389,12 @@ export class UI {
     };
   }
 
-  netStatus(text: string): void {
-    const el = this.menu.querySelector("#o-status") ?? this.lobbyOverlay?.querySelector(".net-status");
-    if (el) el.textContent = text;
+  netStatus(text: string, ok = false): void {
+    const el = this.menu.querySelector<HTMLElement>("#o-status")
+      ?? this.lobbyOverlay?.querySelector<HTMLElement>(".net-status");
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle("ok", ok);
   }
 
   // ---------- Online lobby ----------
@@ -287,25 +408,26 @@ export class UI {
     const allReady = view.players.length >= 2 && view.players.every((p) => p.ready || p.isHost);
     const rows = view.players.map((p) => `
       <div class="score-row">
-        <span class="swatch" style="background:${["#28c7f0", "#f04da0", "#9df04d", "#f0a52d", "#b44df0", "#4df0b4", "#f0654d", "#e8e8f0"][p.seat % 8]}"></span>
-        <span class="sname">${p.name}${p.isMe ? " (you)" : ""}</span>
-        <span class="sval">${p.isHost ? "HOST" : p.ready ? "READY ✔" : "waiting…"}</span>
+        <span class="rank">${String(p.seat + 1).padStart(2, "0")}</span>
+        <span class="swatch" style="background:${PALETTE_HEX[p.seat % 8]}"></span>
+        <span class="sname">${p.name}${p.isMe ? " ·you" : ""}</span>
+        <span class="sval">${p.isHost ? "HOST" : p.ready ? "READY" : "standby"}</span>
       </div>`).join("");
     const s = view.settings;
     const summary = s
-      ? `${s.mode.toUpperCase()} · ${s.terrainType} · wind ${s.windMode} · ${s.turnSeconds ? s.turnSeconds + "s turns" : "no timer"} · HP ${s.startHp}${s.mode === "points" ? ` · ${s.rounds} rounds` : ""}`
+      ? `${s.mode} · ${s.terrainType} · wind ${s.windMode} · ${s.turnSeconds ? s.turnSeconds + "s clock" : "no clock"} · ${s.startHp} hp${s.bannedWeapons?.length ? ` · ${s.bannedWeapons.length} banned` : ""}`
       : "";
     overlay.innerHTML = `
       <div class="panel">
-        <h2>ROOM <span class="room-code">${view.code}</span></h2>
-        <div class="subtitle">Share the code — up to 8 players. ${summary}</div>
+        <h2>Room <span class="room-code">${view.code}</span></h2>
+        <div class="subtitle">Share the code · ${summary}</div>
         ${rows}
-        <div style="height:14px"></div>
+        <div style="height:16px"></div>
         <div class="row-buttons">
           ${view.iAmHost
-            ? `<button class="btn primary" id="l-start" ${allReady ? "" : "disabled"}>START MATCH ▸</button>`
-            : `<button class="btn" id="l-ready">${me?.ready ? "UNREADY" : "READY UP"}</button>`}
-          <button class="btn small" id="l-leave">LEAVE</button>
+            ? `<button class="btn fire-key" id="l-start" style="margin-top:0" ${allReady ? "" : "disabled"}>Launch Operation ▸</button>`
+            : `<button class="btn" id="l-ready">${me?.ready ? "Stand Down" : "Ready Up"}</button>`}
+          <button class="btn small" id="l-leave">Withdraw</button>
         </div>
         <div class="net-status"></div>
       </div>`;
@@ -323,35 +445,44 @@ export class UI {
 
   // ---------- In-game HUD ----------
 
-  buildHud(): void {
+  buildHud(bannedWeapons: number[] = []): void {
+    // Owning this here means no entry path can leave the menu over a live match.
+    this.menu.innerHTML = "";
     this.closeLobby();
+    const bannedSet = new Set(bannedWeapons);
     this.hud.innerHTML = `
       <div class="topbar">
         <span class="turn-name" id="t-name">—</span>
         <span class="timer" id="t-timer">30</span>
-        <span class="wind" id="t-wind"><span>WIND</span><span class="arrow">→</span><span id="t-wind-val">0</span></span>
+        <span class="wind" id="t-wind">
+          <span>WIND</span>
+          <span class="arrow">·</span>
+          <span class="bars"><i></i><i></i><i></i><i></i><i></i></span>
+        </span>
         <span class="mode-info" id="t-mode"></span>
       </div>
+      <div class="fps" id="t-fps" style="display:none"></div>
+      <div class="awards" id="t-awards"></div>
       <div class="xp-strip">
-        <span class="lvl" id="x-lvl">LV 0</span>
+        <span class="lvl" id="x-lvl">LV0</span>
         <div class="bar"><i id="x-fill" style="width:0%"></i></div>
-        <span class="upgrade-hint" id="x-hint" style="display:none">UPGRADE READY [U]</span>
+        <span class="upgrade-hint" id="x-hint" style="display:none">UPGRADE [U]</span>
       </div>
       <div class="bottombar">
         <div class="aim-readout">
-          <div class="row"><span>ANGLE</span><span class="val" id="a-angle">45°</span></div>
-          <div class="row"><span>POWER</span><span class="val" id="a-power">62</span></div>
-          <div class="power-bar"><i id="a-power-fill" style="width:62%"></i></div>
-          <div class="row"><span>FUEL</span><span class="val" id="a-fuel">100</span></div>
-          <div class="fuel-bar"><i id="a-fuel-fill" style="width:100%"></i></div>
+          <div class="row"><span>Elev</span><span class="val" id="a-angle">45°</span></div>
+          <div class="row"><span>Chg</span><span class="val hot" id="a-power">62</span></div>
+          <div class="meter power"><i id="a-power-fill" style="width:62%"></i></div>
+          <div class="row"><span>Fuel</span><span class="val" id="a-fuel">100</span></div>
+          <div class="meter fuel"><i id="a-fuel-fill" style="width:100%"></i></div>
           <div class="wname-current" id="w-current">Shell</div>
         </div>
         <div class="weapon-bar" id="w-bar"></div>
-        <button class="fire-btn" id="fire">FIRE</button>
+        <button class="fire-btn" id="fire">Fire</button>
       </div>
       <div class="controls-hint">
-        <kbd>←→</kbd> drive · <kbd>↑↓</kbd> aim · <kbd>W/S</kbd> power · <kbd>Space</kbd> fire / split<br/>
-        <kbd>1–0</kbd> or wheel: weapon · <kbd>U</kbd> upgrade · drag from tank to aim
+        <kbd>←→</kbd> drive · <kbd>↑↓</kbd> elev · <kbd>W/S</kbd> charge · <kbd>Space</kbd> fire<br/>
+        <kbd>1–0</kbd>/wheel ordnance · <kbd>U</kbd> upgrade · <kbd>M</kbd> mute · <kbd>F3</kbd> perf
       </div>`;
 
     this.turnName = this.hud.querySelector("#t-name")!;
@@ -362,10 +493,13 @@ export class UI {
     this.powerVal = this.hud.querySelector("#a-power")!;
     this.powerFill = this.hud.querySelector("#a-power-fill")!;
     this.fuelFill = this.hud.querySelector("#a-fuel-fill")!;
+    this.fuelVal = this.hud.querySelector("#a-fuel")!;
     this.xpFill = this.hud.querySelector("#x-fill")!;
     this.xpLvl = this.hud.querySelector("#x-lvl")!;
     this.upgradeHint = this.hud.querySelector("#x-hint")!;
     this.weaponNameEl = this.hud.querySelector("#w-current")!;
+    this.awardsEl = this.hud.querySelector("#t-awards")!;
+    this.fpsEl = this.hud.querySelector("#t-fps")!;
     this.fireBtn = this.hud.querySelector<HTMLButtonElement>("#fire")!;
     this.fireBtn.onclick = () => this.cb.onFire();
     this.upgradeHint.onclick = () => this.cb.onUpgrade(-1);
@@ -373,11 +507,12 @@ export class UI {
     const bar = this.hud.querySelector("#w-bar")!;
     this.weaponSlots = WEAPONS.map((w, i) => {
       const slot = document.createElement("div");
-      slot.className = "weapon-slot compact";
+      const isBanned = bannedSet.has(i);
+      slot.className = `weapon-slot${isBanned ? " banned" : ""}`;
       const key = i < 10 ? `${(i + 1) % 10}` : "";
       slot.innerHTML = `<span class="key">${key}</span><span class="tier" style="display:none"></span><span class="icon">${w.icon}</span>`;
-      slot.title = `${w.name} — ${w.desc}`;
-      slot.onclick = () => this.cb.onSelectWeapon(i);
+      slot.title = isBanned ? `${w.name} — BANNED` : `${w.name} — ${w.desc}`;
+      if (!isBanned) slot.onclick = () => this.cb.onSelectWeapon(i);
       bar.appendChild(slot);
       return slot;
     });
@@ -391,7 +526,7 @@ export class UI {
   }
 
   updateTurn(tank: Tank, isMyTurn: boolean): void {
-    this.turnName.textContent = `${tank.name}'s turn`;
+    this.turnName.textContent = tank.name;
     this.turnName.style.color = tank.palette.glow;
     this.fireBtn.disabled = !isMyTurn;
   }
@@ -405,16 +540,18 @@ export class UI {
     this.timerEl.style.display = enabled ? "" : "none";
     if (!enabled) return;
     const s = Math.max(0, Math.ceil(seconds));
-    this.timerEl.textContent = String(s);
+    this.timerEl.textContent = String(s).padStart(2, "0");
     this.timerEl.classList.toggle("low", s <= 5);
   }
 
   updateWind(wind: number): void {
     const arrow = this.windEl.querySelector(".arrow")!;
-    const val = this.windEl.querySelector("#t-wind-val")!;
-    const strength = Math.abs(Math.round(wind / 4));
-    arrow.textContent = wind > 2 ? "→" : wind < -2 ? "←" : "·";
-    val.textContent = String(strength);
+    arrow.textContent = wind > 2 ? "▶" : wind < -2 ? "◀" : "·";
+    const strength = Math.min(5, Math.round(Math.abs(wind) / 38));
+    this.windEl.querySelectorAll<HTMLElement>(".bars i").forEach((bar, i) => {
+      bar.style.height = `${4 + i * 2}px`;
+      bar.classList.toggle("on", i < strength);
+    });
   }
 
   updateAim(tank: Tank): void {
@@ -422,7 +559,7 @@ export class UI {
     this.powerVal.textContent = String(Math.round(tank.power));
     this.powerFill.style.width = `${tank.power}%`;
     this.fuelFill.style.width = `${(tank.fuel / Math.max(1, tank.maxFuel)) * 100}%`;
-    (this.hud.querySelector("#a-fuel")!).textContent = String(Math.round(tank.fuel));
+    this.fuelVal.textContent = String(Math.round(tank.fuel));
   }
 
   updateWeapons(tank: Tank): void {
@@ -442,8 +579,22 @@ export class UI {
     const next = XP_LEVELS[Math.min(tank.level, XP_LEVELS.length - 1)];
     const frac = tank.level >= XP_LEVELS.length ? 1 : (tank.xp - prev) / (next - prev);
     this.xpFill.style.width = `${Math.min(100, frac * 100)}%`;
-    this.xpLvl.textContent = `LV ${tank.level}`;
+    this.xpLvl.textContent = `LV${tank.level}`;
     this.upgradeHint.style.display = tank.upgradePoints > 0 && !tank.isAI ? "" : "none";
+  }
+
+  updateFps(fps: number, degraded: boolean): void {
+    if (!this.fpsEl || this.fpsEl.style.display === "none") return;
+    this.fpsEl.textContent = `${fps} FPS${degraded ? " · ECO" : ""}`;
+    this.fpsEl.classList.toggle("warn", fps < 50);
+  }
+
+  /** F3 toggles the perf readout — off by default. */
+  toggleFps(): boolean {
+    if (!this.fpsEl) return false;
+    const showing = this.fpsEl.style.display === "none";
+    this.fpsEl.style.display = showing ? "" : "none";
+    return showing;
   }
 
   banner(text: string, color: string): void {
@@ -455,7 +606,17 @@ export class UI {
     setTimeout(() => el.remove(), 2300);
   }
 
-  // ---------- Upgrade panel ----------
+  /** Trick-shot ticker — stacks under the banner line. */
+  award(text: string, xp: number): void {
+    if (!this.awardsEl) return;
+    const el = document.createElement("div");
+    el.className = "award";
+    el.innerHTML = `<b>${text}</b> +${xp} XP`;
+    this.awardsEl.appendChild(el);
+    setTimeout(() => el.remove(), 1900);
+  }
+
+  // ---------- Upgrade sheet ----------
 
   showUpgradePanel(tank: Tank): void {
     this.closeUpgradePanel();
@@ -464,25 +625,22 @@ export class UI {
     const rows = WEAPONS.map((w, i) => {
       const tier = tank.weaponTiers[i];
       const maxed = tier >= 2;
-      const nextLabel = maxed ? "MAX" : `▶ T${tier + 2}`;
       return `
-        <div class="upgrade-row">
+        <div class="upgrade-row ${maxed ? "maxed" : ""}">
           <span class="icon">${w.icon}</span>
-          <div class="info">
-            <b>${w.tiers[tier].label}</b>
-            <div class="desc">${w.desc}</div>
-          </div>
+          <div class="info"><b>${w.tiers[tier].label}</b></div>
           <div class="tier-pips">
             ${[0, 1, 2].map((p) => `<span class="pip ${p <= tier ? "on" : ""}"></span>`).join("")}
           </div>
-          <button class="btn small" data-idx="${i}" ${maxed ? "disabled" : ""}>${nextLabel}</button>
+          <button class="btn small" data-idx="${i}" ${maxed ? "disabled" : ""}>${maxed ? "Max" : "Uprate"}</button>
         </div>`;
     }).join("");
     overlay.innerHTML = `
       <div class="panel wide">
-        <h2>⬆ UPGRADE ARSENAL — ${tank.upgradePoints} point${tank.upgradePoints === 1 ? "" : "s"}</h2>
-        <div class="upgrade-list grid2">${rows}</div>
-        <button class="btn" id="u-close">CLOSE [U]</button>
+        <h2>Ordnance Uprating</h2>
+        <div class="subtitle">${tank.upgradePoints} requisition point${tank.upgradePoints === 1 ? "" : "s"} · resets at match end</div>
+        <div class="upgrade-list">${rows}</div>
+        <button class="btn" id="u-close">Close [U]</button>
       </div>`;
     overlay.querySelectorAll<HTMLButtonElement>("button[data-idx]").forEach((btn) => {
       btn.onclick = () => this.cb.onUpgrade(parseInt(btn.dataset.idx!, 10));
@@ -501,26 +659,28 @@ export class UI {
     return this.upgradeOverlay !== null;
   }
 
-  // ---------- Game over ----------
+  // ---------- After-action report ----------
 
   showGameOver(tanks: Tank[], winner: Tank | null, title?: string, pointsMode = false): void {
     const sorted = [...tanks].sort((a, b) =>
       pointsMode ? b.score - a.score : Number(b.alive) - Number(a.alive) || b.damageDealt - a.damageDealt);
-    const rows = sorted.map((t) => `
+    const rows = sorted.map((t, i) => `
       <div class="score-row ${t === winner ? "winner" : ""}">
+        <span class="rank">${String(i + 1).padStart(2, "0")}</span>
         <span class="swatch" style="background:${t.palette.primary}"></span>
         <span class="sname">${t.isVIP ? "♛ " : ""}${t.isJuggernaut ? "☠ " : ""}${t.name}</span>
-        <span class="sval">${pointsMode ? `${t.score} pts · ` : ""}LV ${t.level} · ${Math.round(t.damageDealt)} dmg · ${t.kills} kills</span>
+        <span class="sval">${pointsMode ? `${t.score} pts · ` : ""}lv${t.level} · ${Math.round(t.damageDealt)} dmg · ${t.kills} kill${t.kills === 1 ? "" : "s"}</span>
       </div>`).join("");
     const overlay = document.createElement("div");
     overlay.className = "overlay";
     overlay.innerHTML = `
       <div class="panel">
-        <h1>${title ?? (winner ? `${winner.name.toUpperCase()} WINS` : "MUTUAL DESTRUCTION")}</h1>
-        <div class="subtitle">Progression resets — every match is a level playing field.</div>
+        <div class="subtitle" style="margin:0 0 4px">After-Action Report</div>
+        <h1>${title ?? (winner ? `${winner.name} holds the field` : "Mutual destruction")}</h1>
+        <div class="subtitle">All progression resets · every match starts level</div>
         ${rows}
         <div style="height:14px"></div>
-        <button class="btn primary" id="g-again">PLAY AGAIN ▸</button>
+        <button class="btn fire-key" id="g-again">Reload &amp; Redeploy ▸</button>
       </div>`;
     overlay.querySelector<HTMLButtonElement>("#g-again")!.onclick = () => {
       sfx.ui();

@@ -98,16 +98,48 @@ if (import.meta.env.DEV) {
 
 // Fixed-timestep simulation (60 Hz) with rAF rendering.
 const STEP = 1 / 60;
+const MAX_STEPS = 5; // never spiral: drop sim time rather than stall the frame
 let last = performance.now();
 let accumulator = 0;
 
+// Frame telemetry: a slow rolling average drives particle budget so a heavy
+// 8-tank volley sheds effects instead of dropping below 60 FPS.
+let avgFrameMs = 16.7;
+let quality = 1;
+let fpsAccum = 0;
+let fpsFrames = 0;
+let shownFps = 60;
+
 function frame(now: number): void {
-  accumulator += Math.min(0.25, (now - last) / 1000);
+  const rawDt = (now - last) / 1000;
   last = now;
-  while (accumulator >= STEP) {
+
+  const frameMs = Math.min(100, rawDt * 1000);
+  avgFrameMs += (frameMs - avgFrameMs) * 0.06;
+
+  fpsAccum += rawDt;
+  fpsFrames++;
+  if (fpsAccum >= 0.5) {
+    shownFps = Math.round(fpsFrames / fpsAccum);
+    fpsAccum = 0;
+    fpsFrames = 0;
+    ui.updateFps(shownFps, quality < 0.99);
+  }
+
+  // Hysteresis so quality doesn't oscillate on the boundary.
+  if (avgFrameMs > 19.5 && quality > 0.35) quality = Math.max(0.35, quality - 0.06);
+  else if (avgFrameMs < 15.2 && quality < 1) quality = Math.min(1, quality + 0.02);
+  game.setQuality(quality);
+
+  accumulator += Math.min(0.25, rawDt * game.timeScale);
+  let steps = 0;
+  while (accumulator >= STEP && steps < MAX_STEPS) {
     game.update(STEP);
     accumulator -= STEP;
+    steps++;
   }
+  if (steps === MAX_STEPS) accumulator = 0;
+
   game.draw();
   requestAnimationFrame(frame);
 }

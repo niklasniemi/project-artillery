@@ -4,7 +4,7 @@ import { Particles, ScreenShake } from "./particles";
 import { WEAPONS, levelForXp } from "./weapons";
 import { UI, MatchSettings } from "./ui";
 import { planShot, AiPlan, POWER_TO_VELOCITY } from "./ai";
-import { sfx } from "./audio";
+import { sfx, FireVoice } from "./audio";
 import { clamp, dist, seededRandom, rngRange, rngPick, TAU } from "./util";
 
 export const WORLD_W = 1600;
@@ -72,6 +72,26 @@ interface WinResult {
   title?: string;
 }
 
+/** Per-shot bookkeeping used to award trick-shot bonuses at turn end. */
+interface ShotContext {
+  owner: Tank;
+  originX: number;
+  originY: number;
+  kills: number;
+  voidKills: number;
+  revenge: boolean;
+  directHit: boolean;
+  maxBounces: number;
+  maxImpactDist: number;
+  dealtDamage: boolean;
+}
+
+const FIRE_VOICES: Record<string, FireVoice> = {
+  mortar: "heavy", nuke: "heavy", quake: "heavy",
+  sniper: "energy", railstrike: "energy",
+  homing: "launch", airstrike: "launch",
+};
+
 export class Game {
   private terrain = new Terrain(WORLD_W, WORLD_H);
   private tanks: Tank[] = [];
@@ -83,6 +103,8 @@ export class Game {
   private particles = new Particles();
   private shake = new ScreenShake();
   private bg: HTMLCanvasElement;
+  private vignette: HTMLCanvasElement | null = null;
+  private voidGradient: CanvasGradient | null = null;
   private rng: () => number = Math.random;
 
   private phase: Phase = "idle";
@@ -97,6 +119,13 @@ export class Game {
   private netAccum = 0;
   private aimDirty = false;
   private driveDirty = false;
+
+  private banned = new Set<number>();
+  private shot: ShotContext | null = null;
+
+  /** Brief time dilation on a killing blow; read by the main loop. */
+  timeScale = 1;
+  private slowMo = 0;
 
   // AI turn choreography
   private aiTimer = 0;
@@ -126,6 +155,20 @@ export class Game {
     return !t.isAI;
   }
 
+  /** Render/particle budget, driven by the main loop's frame timing. */
+  setQuality(q: number): void {
+    this.particles.quality = q;
+  }
+
+  isBanned(index: number): boolean {
+    return this.banned.has(index);
+  }
+
+  private firstAllowedWeapon(): number {
+    for (let i = 0; i < WEAPONS.length; i++) if (!this.banned.has(i)) return i;
+    return 0;
+  }
+
   // ---------- Match lifecycle ----------
 
   start(settings: MatchSettings, opts?: { seed?: number; online?: OnlineContext }): void {
@@ -141,6 +184,10 @@ export class Game {
     this.crates = [];
     this.tanks = [];
     this.awaitingAdvance = false;
+    this.shot = null;
+    this.slowMo = 0;
+    this.timeScale = 1;
+    this.banned = new Set(settings.bannedWeapons ?? []);
 
     let players = settings.players;
     if (settings.mode === "assassination") {
@@ -192,7 +239,10 @@ export class Game {
       for (const t of this.tanks) t.team = t === jug ? 1 : 0;
     }
 
-    this.ui.buildHud();
+    const firstAllowed = this.firstAllowedWeapon();
+    for (const t of this.tanks) t.selectedWeapon = firstAllowed;
+
+    this.ui.buildHud([...this.banned]);
     this.currentIndex = -1;
     this.nextTurn();
   }
@@ -260,6 +310,7 @@ export class Game {
 
     if (!t.alive && this.settings.mode === "points") this.respawn(t);
 
+    if (this.banned.has(t.selectedWeapon)) t.selectedWeapon = this.firstAllowedWeapon();
     t.turnsTaken++;
     this.rollWind();
     this.maybeDropCrate();
@@ -343,6 +394,15 @@ export class Game {
     const stats = t.weaponStats;
     const tip = t.barrelTip;
 
+    this.shot = {
+      owner: t,
+      originX: t.x, originY: t.y,
+      kills: 0, voidKills: 0,
+      revenge: false, directHit: false,
+      maxBounces: 0, maxImpactDist: 0,
+      dealtDamage: false,
+    };
+
     if (def.behavior === "railstrike") {
       this.fireRailstrike(t);
     } else {
@@ -358,9 +418,10 @@ export class Game {
         }));
       }
     }
-    sfx.fire();
-    this.particles.sparks(tip.x, tip.y, 10);
-    this.shake.add(0.12);
+    sfx.fire(FIRE_VOICES[def.id] ?? "standard");
+    this.particles.muzzle(tip.x, tip.y, t.angle, def.trailColor);
+    // Kick the camera opposite the barrel — recoil reads better than pure noise.
+    this.shake.add(0.14, -Math.cos(t.angle) * 0.5, -Math.sin(t.angle) * 0.5);
     this.phase = "projectiles";
     this.ui.updateTurn(t, false);
     this.ui.closeUpgradePanel();
@@ -439,6 +500,14 @@ export class Game {
     this.particles.explosion(x, y, radius);
     sfx.explosion(clamp(radius / 90, 0.2, 1));
     this.shake.add(clamp(radius / 110, 0.12, 0.8));
+
+    if (this.shot && this.shot.owner === owner) {
+      this.shot.maxImpactDist = Math.max(
+        this.shot.maxImpactDist,
+        dist(this.shot.originX, this.shot.originY, x, y),
+      );
+      if (opts.direct) this.shot.directHit = true;
+    }
 
     let enemyDamage = 0;
     for (const tank of this.tanks) {
@@ -576,6 +645,9 @@ export class Game {
 
     let damage = stats.damage;
     if (behavior === "bouncer") damage *= 1 + (stats.bounceBonus ?? 0.3) * p.bounces;
+    if (this.shot && this.shot.owner === p.owner) {
+      this.shot.maxBounces = Math.max(this.shot.maxBounces, p.bounces);
+    }
 
     this.blastAt(p.x, p.y, stats.radius, damage, p.owner, {
       direct: directHit,
@@ -590,6 +662,8 @@ export class Game {
     tank.hp = Math.max(0, tank.hp - dmg);
     if (tank.isEnemyOf(source)) {
       source.damageDealt += dmg;
+      tank.lastDamagedBy = source;
+      if (this.shot && this.shot.owner === source) this.shot.dealtDamage = true;
       this.grantXp(source, dmg);
     }
     if (tank.hp <= 0 && tank.alive) this.killTank(tank, source);
@@ -597,12 +671,45 @@ export class Game {
 
   private killTank(tank: Tank, killer?: Tank): void {
     tank.alive = false;
-    if (killer && killer.isEnemyOf(tank)) killer.kills++;
+    if (killer && killer.isEnemyOf(tank)) {
+      killer.kills++;
+      if (this.shot && this.shot.owner === killer) {
+        this.shot.kills++;
+        if (killer.lastDamagedBy === tank) this.shot.revenge = true;
+      }
+    }
     this.particles.explosion(tank.x, tank.y - 8, 55);
-    this.particles.burst(tank.x, tank.y - 8, 26, 320, [tank.palette.primary, tank.palette.glow, "#ffffff"], 1.4, 4, 380);
+    this.particles.burst(tank.x, tank.y - 8, 26, 320, [tank.palette.primary, tank.palette.glow, "#ffffff"], 1.4, 4, 380, 2);
+    this.particles.ring(tank.x, tank.y - 8, 150, 0.55, tank.palette.glow, 3);
     sfx.explosion(1);
-    this.shake.add(0.8);
-    this.ui.banner(`${tank.name} DESTROYED`, tank.palette.glow);
+    this.shake.add(0.85);
+    // Brief dilation so the kill lands — sim steps are unchanged, only pacing.
+    this.slowMo = Math.max(this.slowMo, 0.24);
+    this.ui.banner(`${tank.name} destroyed`, tank.palette.glow);
+  }
+
+  /** Scores the shot that just resolved and pays out bonus XP. */
+  private awardTrickShots(): void {
+    const s = this.shot;
+    this.shot = null;
+    if (!s || !s.owner.alive) return;
+
+    const awards: { text: string; xp: number }[] = [];
+    if (s.kills >= 3) awards.push({ text: "Triple kill", xp: 140 });
+    else if (s.kills === 2) awards.push({ text: "Double kill", xp: 70 });
+    if (s.voidKills > 0) awards.push({ text: "Into the void", xp: 50 });
+    if (s.revenge) awards.push({ text: "Revenge", xp: 25 });
+    if (s.directHit) awards.push({ text: "Direct hit", xp: 20 });
+    if (s.maxBounces >= 2 && s.dealtDamage) awards.push({ text: "Bank shot", xp: 30 });
+    if (s.dealtDamage && s.maxImpactDist > 700) awards.push({ text: "Long shot", xp: 25 });
+
+    if (awards.length === 0) return;
+    const showToPlayer = !s.owner.isAI;
+    for (const a of awards) {
+      this.grantXp(s.owner, a.xp);
+      if (showToPlayer) this.ui.award(a.text, a.xp);
+    }
+    if (showToPlayer) sfx.award();
   }
 
   private grantXp(tank: Tank, amount: number): void {
@@ -619,7 +726,7 @@ export class Game {
         while (tank.upgradePoints > 0) {
           const candidates = ["shell", "mortar", "sniper", "cluster"]
             .map((id) => WEAPONS.findIndex((w) => w.id === id))
-            .filter((i) => tank.weaponTiers[i] < 2);
+            .filter((i) => i >= 0 && !this.banned.has(i) && tank.weaponTiers[i] < 2);
           if (candidates.length === 0) break;
           tank.weaponTiers[rngPick(this.rng, candidates)]++;
           tank.upgradePoints--;
@@ -653,9 +760,22 @@ export class Game {
 
   selectWeapon(index: number): void {
     if (this.phase !== "input" || !this.isMyTurn()) return;
-    this.currentTank.selectedWeapon = clamp(index, 0, WEAPONS.length - 1);
+    const i = clamp(index, 0, WEAPONS.length - 1);
+    if (this.banned.has(i)) return;
+    this.currentTank.selectedWeapon = i;
     sfx.ui();
     this.ui.updateWeapons(this.currentTank);
+  }
+
+  /** Wheel/keyboard cycling skips banned ordnance entirely. */
+  cycleWeapon(dir: 1 | -1): void {
+    if (this.phase !== "input" || !this.isMyTurn()) return;
+    let i = this.currentTank.selectedWeapon;
+    for (let n = 0; n < WEAPONS.length; n++) {
+      i = (i + dir + WEAPONS.length) % WEAPONS.length;
+      if (!this.banned.has(i)) break;
+    }
+    this.selectWeapon(i);
   }
 
   // ---------- Online: remote inputs & turn sync ----------
@@ -762,6 +882,8 @@ export class Game {
     window.addEventListener("keydown", (e) => {
       if (e.repeat) return;
       this.keys.add(e.key.toLowerCase());
+      if (e.key === "F3") { e.preventDefault(); this.ui.toggleFps(); return; }
+      if (e.key.toLowerCase() === "m") sfx.toggleMute();
       if (e.key === " ") {
         e.preventDefault();
         if (this.phase === "input" && this.isMyTurn()) this.fire();
@@ -782,8 +904,7 @@ export class Game {
     this.canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       if (this.phase !== "input" || !this.isMyTurn()) return;
-      const dir = e.deltaY > 0 ? 1 : -1;
-      this.selectWeapon((this.currentTank.selectedWeapon + dir + WEAPONS.length) % WEAPONS.length);
+      this.cycleWeapon(e.deltaY > 0 ? 1 : -1);
     }, { passive: false });
 
     this.canvas.addEventListener("pointerdown", (e) => {
@@ -844,6 +965,13 @@ export class Game {
       return;
     }
 
+    if (this.slowMo > 0) {
+      this.slowMo = Math.max(0, this.slowMo - dt);
+      this.timeScale = catchUp ? 1 : 0.34;
+    } else {
+      this.timeScale = 1;
+    }
+
     if (!catchUp) this.handleHeldKeys(dt);
     this.particles.update(dt);
     this.shake.update(dt);
@@ -861,7 +989,9 @@ export class Game {
         this.particles.sparks(tank.x, tank.y, 6);
       }
       if (tank.y > WORLD_H - 2 && tank.alive) {
-        this.killTank(tank, this.phase === "projectiles" || this.phase === "settle" ? this.currentTank : undefined);
+        const pushedIn = this.phase === "projectiles" || this.phase === "settle";
+        if (pushedIn && this.shot && tank.isEnemyOf(this.shot.owner)) this.shot.voidKills++;
+        this.killTank(tank, pushedIn ? this.currentTank : undefined);
         this.particles.burst(tank.x, WORLD_H - 10, 30, 260, ["#4de8ff", "#ffffff", tank.palette.glow], 1.2, 4, -80);
         this.ui.banner(`${tank.name} FELL INTO THE VOID`, "#4de8ff");
       }
@@ -897,7 +1027,7 @@ export class Game {
     if (!this.online && t.isAI) {
       this.aiTimer += dt;
       if (this.aiTimer > 0.9 && !this.aiPlan) {
-        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind);
+        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.banned);
         t.selectedWeapon = this.aiPlan.weaponIndex;
         this.ui.updateWeapons(t);
       }
@@ -1149,6 +1279,9 @@ export class Game {
     const anyFalling = this.tanks.some((t) => t.alive && t.fallFrom >= 0);
     if (this.settleTime > 0 || anyFalling) return;
 
+    // Pay out bonuses before any snapshot so the XP is part of the sync.
+    if (this.shot) this.awardTrickShots();
+
     if (this.online) {
       if (this.awaitingAdvance) return;
       this.phase = "sync";
@@ -1197,31 +1330,60 @@ export class Game {
     bg.width = WORLD_W;
     bg.height = WORLD_H;
     const c = bg.getContext("2d")!;
+    // Night sky over a burning horizon — warm end ties into the UI's hazard orange.
     const grad = c.createLinearGradient(0, 0, 0, WORLD_H);
-    grad.addColorStop(0, "#07070f");
-    grad.addColorStop(0.5, "#10142e");
-    grad.addColorStop(0.85, "#1d1440");
-    grad.addColorStop(1, "#2b1050");
+    grad.addColorStop(0, "#05060a");
+    grad.addColorStop(0.42, "#0b1020");
+    grad.addColorStop(0.72, "#1d1a2a");
+    grad.addColorStop(0.9, "#3d2418");
+    grad.addColorStop(1, "#5c2f16");
     c.fillStyle = grad;
     c.fillRect(0, 0, WORLD_W, WORLD_H);
-    for (let i = 0; i < 220; i++) {
+
+    for (let i = 0; i < 240; i++) {
       const x = Math.random() * WORLD_W;
-      const y = Math.random() * WORLD_H * 0.7;
-      const s = Math.random() * 1.8 + 0.4;
-      c.globalAlpha = Math.random() * 0.7 + 0.15;
-      c.fillStyle = Math.random() < 0.85 ? "#cfe4ff" : "#ffd9f2";
+      const y = Math.random() * WORLD_H * 0.62;
+      const s = Math.random() * 1.7 + 0.4;
+      c.globalAlpha = Math.random() * 0.65 + 0.12;
+      c.fillStyle = Math.random() < 0.88 ? "#dce6f5" : "#ffd9b8";
       c.fillRect(x, y, s, s);
     }
     c.globalAlpha = 1;
+
+    // Haze bloom just above the horizon.
+    const haze = c.createRadialGradient(
+      WORLD_W * 0.5, WORLD_H * 1.02, 40,
+      WORLD_W * 0.5, WORLD_H * 1.02, WORLD_W * 0.62,
+    );
+    haze.addColorStop(0, "rgba(255,120,45,0.34)");
+    haze.addColorStop(1, "rgba(255,120,45,0)");
+    c.fillStyle = haze;
+    c.fillRect(0, WORLD_H * 0.55, WORLD_W, WORLD_H * 0.45);
+
+    // Distant moon, cold against the warm horizon.
     c.beginPath();
-    c.arc(WORLD_W * 0.82, WORLD_H * 0.2, 60, 0, TAU);
-    c.fillStyle = "#1a2c5c";
+    c.arc(WORLD_W * 0.83, WORLD_H * 0.17, 54, 0, TAU);
+    c.fillStyle = "#171d2e";
     c.fill();
-    c.beginPath();
-    c.arc(WORLD_W * 0.82, WORLD_H * 0.2, 60, 0, TAU);
-    c.strokeStyle = "rgba(77,232,255,0.5)";
-    c.lineWidth = 2;
+    c.strokeStyle = "rgba(236,228,210,0.32)";
+    c.lineWidth = 1.5;
     c.stroke();
+
+    // Ridge silhouettes for depth.
+    for (let layer = 0; layer < 2; layer++) {
+      c.beginPath();
+      const baseY = WORLD_H * (0.66 + layer * 0.08);
+      c.moveTo(0, WORLD_H);
+      c.lineTo(0, baseY);
+      for (let x = 0; x <= WORLD_W; x += 40) {
+        const h = Math.sin(x * 0.0031 + layer * 2.2) * 46 + Math.sin(x * 0.0087 + layer) * 22;
+        c.lineTo(x, baseY - h);
+      }
+      c.lineTo(WORLD_W, WORLD_H);
+      c.closePath();
+      c.fillStyle = layer === 0 ? "rgba(9,10,18,0.55)" : "rgba(5,6,12,0.72)";
+      c.fill();
+    }
     return bg;
   }
 
@@ -1234,9 +1396,24 @@ export class Game {
     ctx.drawImage(this.bg, 0, 0);
     this.terrain.draw(ctx);
 
+    // Molten kill-line along the bottom of the world. The gradient is built
+    // once and modulated with globalAlpha rather than rebuilt each frame.
     const glow = 0.5 + 0.3 * Math.sin(performance.now() / 300);
-    ctx.fillStyle = `rgba(77, 232, 255, ${glow * 0.55})`;
-    ctx.fillRect(0, WORLD_H - 5, WORLD_W, 5);
+    if (!this.voidGradient) {
+      const vg = ctx.createLinearGradient(0, WORLD_H - 46, 0, WORLD_H);
+      vg.addColorStop(0, "rgba(255, 90, 31, 0)");
+      vg.addColorStop(1, "rgba(255, 128, 40, 1)");
+      this.voidGradient = vg;
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.3 + glow * 0.25;
+    ctx.fillStyle = this.voidGradient;
+    ctx.fillRect(0, WORLD_H - 46, WORLD_W, 46);
+    ctx.globalAlpha = 0.55 + glow * 0.35;
+    ctx.fillStyle = "rgb(255, 226, 178)";
+    ctx.fillRect(0, WORLD_H - 3, WORLD_W, 3);
+    ctx.restore();
 
     for (const crate of this.crates) crate.draw(ctx);
 
@@ -1252,10 +1429,9 @@ export class Game {
       const t = b.life / b.maxLife;
       ctx.save();
       ctx.globalAlpha = t;
+      ctx.globalCompositeOperation = "lighter";
       ctx.strokeStyle = b.color;
       ctx.lineWidth = 5 * t + 1;
-      ctx.shadowColor = b.color;
-      ctx.shadowBlur = 18;
       ctx.beginPath();
       ctx.moveTo(b.x1, b.y1);
       ctx.lineTo(b.x2, b.y2);
@@ -1265,6 +1441,35 @@ export class Game {
 
     for (const p of this.projectiles) p.draw(ctx);
     this.particles.draw(ctx);
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Detonation white-out.
+    if (this.particles.flash > 0.01) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = `rgba(255, 226, 178, ${this.particles.flash * 0.32})`;
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+      ctx.restore();
+    }
+
+    // Vignette keeps the eye on the middle of the field. Pre-rasterized once —
+    // blitting it beats re-filling a full-screen gradient every frame.
+    if (!this.vignette) {
+      const v = document.createElement("canvas");
+      v.width = WORLD_W; v.height = WORLD_H;
+      const vc = v.getContext("2d")!;
+      const g = vc.createRadialGradient(
+        WORLD_W / 2, WORLD_H / 2, WORLD_H * 0.42,
+        WORLD_W / 2, WORLD_H / 2, WORLD_H * 0.95,
+      );
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(1, "rgba(6,5,4,0.62)");
+      vc.fillStyle = g;
+      vc.fillRect(0, 0, WORLD_W, WORLD_H);
+      this.vignette = v;
+    }
+    ctx.drawImage(this.vignette, 0, 0);
   }
 
   private drawAimGuide(ctx: CanvasRenderingContext2D, t: Tank): void {
