@@ -4,6 +4,8 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 
 ## Features
 
+- **Six tank chassis** with real trade-offs — Vanguard, Scout, Bulwark, Howitzer, Sapper, Reaver; pick chassis and livery before every match
+- **Cinematics** — a roll-call cutscene introduces every tank at the open, and a kill cam replays the shot that destroyed someone
 - **Online multiplayer** — Colyseus lockstep server, room codes, up to 8 players, ready-up lobby
 - **Trick-shot bonuses** — direct hits, long shots, bank shots, multi-kills, void kills and revenge kills all pay bonus XP
 - **Weapon bans** — the host can strike any ordnance out of the match from the armory grid
@@ -76,6 +78,7 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | 1–0 / mouse wheel / click | Select weapon (wheel cycles all 20, skipping bans) |
 | M | Mute audio |
 | F3 | Frame-rate / quality readout |
+| Space / Esc / click | Skip a cutscene or kill cam |
 | U | Open upgrade panel (when you have points) |
 
 ## Roadmap
@@ -96,6 +99,27 @@ nothing is rounded and nothing glows. Native `<select>` and `<input type=range>`
 controls are replaced with segmented switch banks and notched dials so the whole
 surface reads as equipment. In-game, the HUD continues the same system, so the
 chrome stays legible against the world without competing with it.
+
+## Chassis balance
+
+Each chassis multiplies a shared baseline. `hp` and `armor` compound, so
+**effective hull is `hp / armor`** — that is the number tuned, and it is kept
+inside roughly 77–139 against a 100 baseline.
+
+| Chassis | Role | Leans on | Pays for it with |
+|---|---|---|---|
+| Vanguard | All-round | Slightly higher damage | Nothing special |
+| Scout | Skirmisher | 1.7× fuel, 1.5× drive | Thin hull |
+| Bulwark | Assault | Toughest hull, wide blast | Slow, low fuel, soft muzzle |
+| Howitzer | Marksman | 1.28× muzzle, half wind drift | Thin hull, small blast |
+| Sapper | Engineer | 1.4× blast, 1.25× XP | Weakest direct damage |
+| Reaver | Glass cannon | 1.3× damage | Takes 15% more |
+
+Balance is measured, not asserted: a 120-game AI round-robin (every pair, seats
+alternated, three terrain types) lands every chassis between **45% and 57.5%**
+win rate — inside one standard error of even at that sample size. The AI
+repositions with its fuel before firing, which is what gives the mobile chassis
+their value; without that, mobility stats are worth nothing in a duel.
 
 ## Performance notes
 

@@ -1,6 +1,7 @@
 import { Client, Room } from "colyseus.js";
 import { MatchSettings, LobbyView } from "./ui";
 import { FireMsg, SplitMsg, Snapshot } from "./game";
+import { Loadout } from "./tanks";
 
 const SERVER_KEY = "pa-server-url";
 
@@ -61,14 +62,17 @@ export function resolveServerUrl(): string {
 export interface StartPayload {
   seed: number;
   settings: MatchSettings;
-  seats: { seat: number; name: string }[];
+  seats: { seat: number; name: string; loadout?: Loadout }[];
   mySeat: number;
 }
 
 interface LobbyMsg {
   code: string;
   hostId: string;
-  players: { sessionId: string; name: string; seat: number; ready: boolean; host: boolean }[];
+  players: {
+    sessionId: string; name: string; seat: number;
+    ready: boolean; host: boolean; loadout?: Loadout;
+  }[];
   settings: MatchSettings | null;
 }
 
@@ -147,6 +151,7 @@ export class Net {
             ready: p.ready,
             isHost: p.host,
             isMe: p.sessionId === room.sessionId,
+            loadout: p.loadout,
           })),
         iAmHost: msg.hostId === room.sessionId,
         settings: msg.settings,

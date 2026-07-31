@@ -1,10 +1,16 @@
 import { Room, Client } from "colyseus";
 
+interface Loadout {
+  type: string;
+  color: number;
+}
+
 interface PlayerInfo {
   name: string;
   seat: number;
   ready: boolean;
   connected: boolean;
+  loadout: Loadout;
 }
 
 /**
@@ -29,6 +35,16 @@ export class ArtilleryRoom extends Room {
     this.onMessage("settings", (client, s: { turnSeconds?: number }) => {
       if (client.sessionId !== this.hostId || this.phase !== "lobby") return;
       this.settings = s;
+      this.broadcastLobby();
+    });
+
+    this.onMessage("loadout", (client, l: Loadout) => {
+      const p = this.players.get(client.sessionId);
+      if (!p || this.phase !== "lobby" || !l) return;
+      p.loadout = {
+        type: String(l.type ?? "vanguard").slice(0, 24),
+        color: Number.isFinite(l.color) ? Math.max(0, Math.floor(l.color)) : p.seat,
+      };
       this.broadcastLobby();
     });
 
@@ -78,7 +94,10 @@ export class ArtilleryRoom extends Room {
     let seat = 0;
     while (taken.has(seat)) seat++;
     const name = String(options?.name ?? "Pilot").slice(0, 14) || "Pilot";
-    this.players.set(client.sessionId, { name, seat, ready: false, connected: true });
+    this.players.set(client.sessionId, {
+      name, seat, ready: false, connected: true,
+      loadout: { type: "vanguard", color: seat },
+    });
     if (!this.hostId) this.hostId = client.sessionId;
     this.broadcastLobby();
   }
@@ -120,7 +139,7 @@ export class ArtilleryRoom extends Room {
     const seed = Math.floor(Math.random() * 1e9);
     const seats = list
       .sort((a, b) => a.seat - b.seat)
-      .map((p) => ({ seat: p.seat, name: p.name }));
+      .map((p) => ({ seat: p.seat, name: p.name, loadout: p.loadout }));
     for (const c of this.clients) {
       const p = this.players.get(c.sessionId)!;
       c.send("start", { seed, settings: this.settings, seats, mySeat: p.seat });
@@ -165,7 +184,9 @@ export class ArtilleryRoom extends Room {
 
   private turnMs(): number {
     const s = this.settings?.turnSeconds ?? 30;
-    return (s > 0 ? s : 120) * 1000 + 10_000; // generous grace on top of the client timer
+    // Generous grace over the client timer: cutscenes and kill-cam replays
+    // sit between turns without the watchdog firing.
+    return (s > 0 ? s : 120) * 1000 + 25_000;
   }
 
   private seatAfter(seat: number): number {
@@ -200,6 +221,7 @@ export class ArtilleryRoom extends Room {
         seat: p.seat,
         ready: p.ready,
         host: sessionId === this.hostId,
+        loadout: p.loadout,
       })),
     });
   }

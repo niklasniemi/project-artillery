@@ -1,16 +1,17 @@
 import { Terrain } from "./terrain";
-import { Tank, Projectile, Crate, CrateKind, TANK_PALETTES, TANK_RADIUS, GRAVITY } from "./entities";
+import { Tank, Projectile, Crate, CrateKind, TANK_RADIUS, GRAVITY } from "./entities";
+import { Loadout, TankPalette, drawChassis } from "./tanks";
 import { Particles, ScreenShake } from "./particles";
 import { WEAPONS, levelForXp } from "./weapons";
 import { UI, MatchSettings } from "./ui";
-import { planShot, AiPlan, POWER_TO_VELOCITY } from "./ai";
+import { planShot, planMove, AiPlan, POWER_TO_VELOCITY } from "./ai";
 import { sfx, FireVoice } from "./audio";
-import { clamp, dist, seededRandom, rngRange, rngPick, TAU } from "./util";
+import { clamp, dist, lerp, easeInOut, seededRandom, rngRange, rngPick, TAU } from "./util";
 
 export const WORLD_W = 1600;
 export const WORLD_H = 900;
 
-type Phase = "idle" | "input" | "projectiles" | "settle" | "sync" | "gameover";
+type Phase = "idle" | "intro" | "input" | "projectiles" | "settle" | "sync" | "cinematic" | "gameover";
 
 const WIND_RANGES = { none: 0, low: 35, realistic: 95, chaotic: 190 } as const;
 
@@ -86,6 +87,40 @@ interface ShotContext {
   dealtDamage: boolean;
 }
 
+interface Camera { x: number; y: number; zoom: number }
+
+/** A tank's on-screen state frozen at fire time, for kill-cam playback. */
+interface GhostTank {
+  x: number; y: number;
+  angle: number; facing: 1 | -1;
+  typeId: string;
+  palette: TankPalette;
+  name: string;
+  alive: boolean;
+}
+
+interface KillCam {
+  path: { x: number; y: number }[];
+  trailColor: string;
+  ghosts: GhostTank[];
+  killAt: { x: number; y: number };
+  victimName: string;
+  victimColor: string;
+  shooterName: string;
+}
+
+type CineKind = "intro" | "killcam";
+
+interface Cinematic {
+  kind: CineKind;
+  t: number;
+  duration: number;
+  killCam?: KillCam;
+}
+
+const INTRO_PER_TANK = 0.85;
+const INTRO_OUTRO = 0.7;
+
 const FIRE_VOICES: Record<string, FireVoice> = {
   mortar: "heavy", nuke: "heavy", quake: "heavy",
   sniper: "energy", railstrike: "energy",
@@ -127,10 +162,23 @@ export class Game {
   timeScale = 1;
   private slowMo = 0;
 
+  // Camera + cinematics
+  private cam: Camera = { x: WORLD_W / 2, y: WORLD_H / 2, zoom: 1 };
+  private cine: Cinematic | null = null;
+  private queuedAdvance: { nextSeat: number; snapshot: Snapshot | null; gameOver: boolean } | null = null;
+  /** Terrain as it looked when the shot was fired, so replays show intact ground. */
+  private preShotTerrain: HTMLCanvasElement | null = null;
+  private shotPath: { x: number; y: number }[] = [];
+  private shotGhosts: GhostTank[] = [];
+  private shotTrailColor = "#ffd24d";
+  private pendingKillCam: KillCam | null = null;
+
   // AI turn choreography
   private aiTimer = 0;
   private aiPlan: AiPlan | null = null;
   private aiFired = false;
+  private aiMoveTarget: number | null = null;
+  private aiAimFrom = 0;
 
   private keys = new Set<string>();
   private aiming = false;
@@ -212,8 +260,14 @@ export class Game {
         spawnX = clamp(x + (tries % 2 === 0 ? 1 : -1) * (tries * 14), TANK_RADIUS, WORLD_W - TANK_RADIUS);
         surface = this.terrain.surfaceY(spawnX);
       }
+      // Anyone without an explicit loadout (bots, legacy callers) gets one
+      // from the seeded RNG so every client agrees on it.
+      const loadout: Loadout = p.loadout ?? {
+        type: rngPick(this.rng, ["vanguard", "scout", "bulwark", "howitzer", "sapper", "reaver"]),
+        color: i,
+      };
       const tank = new Tank(
-        p.name, TANK_PALETTES[i % TANK_PALETTES.length], p.isAI,
+        p.name, loadout, p.isAI,
         spawnX, surface >= 0 ? surface : WORLD_H * 0.5,
         settings.startHp, settings.startFuel,
       );
@@ -244,7 +298,166 @@ export class Game {
 
     this.ui.buildHud([...this.banned]);
     this.currentIndex = -1;
-    this.nextTurn();
+    this.cam = { x: WORLD_W / 2, y: WORLD_H / 2, zoom: 1 };
+    this.cine = null;
+    this.queuedAdvance = null;
+    this.pendingKillCam = null;
+
+    if (settings.cinematics !== false && this.tanks.length > 0) {
+      this.startIntro();
+    } else {
+      this.nextTurn();
+    }
+  }
+
+  // ---------- Cinematics ----------
+
+  private startIntro(): void {
+    this.phase = "cinematic";
+    this.cine = {
+      kind: "intro",
+      t: 0,
+      duration: this.tanks.length * INTRO_PER_TANK + INTRO_OUTRO,
+    };
+    this.ui.setCinematic(true, "Roll call");
+  }
+
+  /** Space / click / Esc jumps straight past whatever is playing. */
+  skipCinematic(): void {
+    if (this.phase !== "cinematic" || !this.cine) return;
+    this.endCinematic();
+  }
+
+  private endCinematic(): void {
+    const kind = this.cine?.kind;
+    this.cine = null;
+    this.ui.setCinematic(false);
+    this.cam = { x: WORLD_W / 2, y: WORLD_H / 2, zoom: 1 };
+    this.timeScale = 1;
+
+    if (kind === "intro") {
+      this.nextTurn();
+      return;
+    }
+
+    // Kill cam finished — resume the turn hand-off it was holding up.
+    if (this.queuedAdvance) {
+      const q = this.queuedAdvance;
+      this.queuedAdvance = null;
+      this.applyAdvance(q.nextSeat, q.snapshot, q.gameOver);
+    } else if (this.online) {
+      this.phase = "sync"; // still waiting on the server
+    } else {
+      this.nextTurn();
+    }
+  }
+
+  private updateCinematic(dt: number): void {
+    const c = this.cine;
+    if (!c) { this.phase = "input"; return; }
+    c.t += dt;
+    if (c.kind === "intro") this.updateIntro(c);
+    else this.updateKillCam(c);
+    if (c.t >= c.duration) this.endCinematic();
+  }
+
+  private updateIntro(c: Cinematic): void {
+    const n = this.tanks.length;
+    const idx = Math.min(n - 1, Math.floor(c.t / INTRO_PER_TANK));
+    const local = c.t - idx * INTRO_PER_TANK;
+
+    if (c.t >= n * INTRO_PER_TANK) {
+      // Pull back to reveal the whole battlefield.
+      const k = Math.min(1, (c.t - n * INTRO_PER_TANK) / INTRO_OUTRO);
+      const e = easeInOut(k);
+      this.cam.x = lerp(this.cam.x, WORLD_W / 2, 0.12);
+      this.cam.y = lerp(this.cam.y, WORLD_H / 2, 0.12);
+      this.cam.zoom = lerp(this.cam.zoom, 1, 0.1 + e * 0.1);
+      this.ui.setCinematicCard(null);
+      return;
+    }
+
+    const t = this.tanks[idx];
+    // Ease into each tank, then drift slightly for a live-camera feel.
+    const k = Math.min(1, local / 0.42);
+    const e = easeInOut(k);
+    // Push in tight, then drift back out a touch so the shot feels handheld.
+    const targetZoom = 3.35 - e * 0.25 - local * 0.18;
+    this.cam.x = lerp(this.cam.x, t.x, 0.06 + e * 0.11);
+    this.cam.y = lerp(this.cam.y, t.y - 26, 0.06 + e * 0.11);
+    this.cam.zoom = lerp(this.cam.zoom, targetZoom, 0.1);
+    this.clampCamera();
+
+    this.ui.setCinematicCard({
+      name: t.name,
+      type: t.type.name,
+      role: t.type.role,
+      color: t.palette.primary,
+      index: idx + 1,
+      total: n,
+    });
+  }
+
+  private updateKillCam(c: Cinematic): void {
+    const kc = c.killCam!;
+    const n = kc.path.length;
+    if (n === 0) return;
+
+    // Play the recorded flight, then hold on the detonation.
+    const flightTime = c.duration - 1.15;
+    const k = Math.min(1, c.t / flightTime);
+    // Ease out so the last stretch before impact plays slower.
+    const eased = 1 - Math.pow(1 - k, 1.7);
+    const i = Math.min(n - 1, Math.floor(eased * (n - 1)));
+    const p = kc.path[i];
+
+    const approach = Math.min(1, c.t / c.duration);
+    const targetZoom = 1.55 + approach * 0.85;
+    this.cam.x = lerp(this.cam.x, p.x, 0.14);
+    this.cam.y = lerp(this.cam.y, p.y, 0.14);
+    this.cam.zoom = lerp(this.cam.zoom, targetZoom, 0.06);
+    this.clampCamera();
+
+    // Detonate once, when playback reaches the end of the path.
+    if (k >= 1 && !this.killCamDetonated) {
+      this.killCamDetonated = true;
+      this.particles.explosion(kc.killAt.x, kc.killAt.y, 70);
+      this.shake.add(0.7);
+      sfx.explosion(0.9);
+    }
+    this.timeScale = k >= 1 ? 0.5 : 0.72;
+  }
+
+  private killCamDetonated = false;
+
+  private clampCamera(): void {
+    const z = Math.max(1, this.cam.zoom);
+    this.cam.zoom = z;
+    const halfW = WORLD_W / (2 * z);
+    const halfH = WORLD_H / (2 * z);
+    this.cam.x = clamp(this.cam.x, halfW, WORLD_W - halfW);
+    this.cam.y = clamp(this.cam.y, halfH, WORLD_H - halfH);
+  }
+
+  private startKillCam(kc: KillCam): void {
+    this.phase = "cinematic";
+    this.killCamDetonated = false;
+    // Playback length scales with how long the shot actually flew.
+    const flight = clamp(kc.path.length / 60, 0.9, 3.2);
+    this.cine = { kind: "killcam", t: 0, duration: flight + 1.15, killCam: kc };
+    // Clear live effects so the replay starts on a clean field.
+    this.particles.reset();
+    this.cam = { x: kc.path[0]?.x ?? WORLD_W / 2, y: kc.path[0]?.y ?? WORLD_H / 2, zoom: 1.4 };
+    this.clampCamera();
+    this.ui.setCinematic(true, "Kill cam");
+    this.ui.setCinematicCard({
+      name: kc.victimName,
+      type: "Destroyed",
+      role: `by ${kc.shooterName}`,
+      color: kc.victimColor,
+      index: 0, total: 0,
+    });
+    sfx.ui();
   }
 
   /** Mode-aware end-of-match check. */
@@ -320,6 +533,8 @@ export class Game {
     this.aiTimer = 0;
     this.aiPlan = null;
     this.aiFired = false;
+    this.aiMoveTarget = null;
+    this.aiAimFrom = 0;
 
     // Point the barrel at the nearest enemy so turns start naturally.
     const foe = this.tanks.filter((e) => e.alive && e.isEnemyOf(t))
@@ -403,13 +618,19 @@ export class Game {
       dealtDamage: false,
     };
 
+    // Freeze the field for a possible kill-cam replay of this shot.
+    if (this.settings.cinematics !== false) {
+      this.capturePreShot();
+      this.shotTrailColor = def.trailColor;
+    }
+
     if (def.behavior === "railstrike") {
       this.fireRailstrike(t);
     } else {
       const count = def.behavior === "twins" ? (stats.count ?? 2) : 1;
       for (let i = 0; i < count; i++) {
         const spread = count > 1 ? (i - (count - 1) / 2) * 0.055 : 0;
-        const v = t.power * POWER_TO_VELOCITY * def.speedMul;
+        const v = t.power * POWER_TO_VELOCITY * def.speedMul * t.attrs.velocity;
         this.projectiles.push(new Projectile({
           x: tip.x, y: tip.y,
           vx: Math.cos(t.angle + spread) * v,
@@ -425,6 +646,28 @@ export class Game {
     this.phase = "projectiles";
     this.ui.updateTurn(t, false);
     this.ui.closeUpgradePanel();
+  }
+
+  /**
+   * Copies the terrain and every tank pose at fire time. The replay draws
+   * these instead of live state, so the crater the shot digs is not already
+   * present when the shell is still in the air.
+   */
+  private capturePreShot(): void {
+    if (!this.preShotTerrain) {
+      const c = document.createElement("canvas");
+      c.width = WORLD_W; c.height = WORLD_H;
+      this.preShotTerrain = c;
+    }
+    const ctx = this.preShotTerrain.getContext("2d")!;
+    ctx.clearRect(0, 0, WORLD_W, WORLD_H);
+    ctx.drawImage(this.terrain.canvas as CanvasImageSource, 0, 0);
+
+    this.shotGhosts = this.tanks.map((t) => ({
+      x: t.x, y: t.y, angle: t.angle, facing: t.facing,
+      typeId: t.type.id, palette: t.palette, name: t.name, alive: t.alive,
+    }));
+    this.shotPath = [];
   }
 
   private fireRailstrike(t: Tank): void {
@@ -493,9 +736,10 @@ export class Game {
 
   /** Core detonation: carve + FX + radial damage. Returns damage dealt to enemies. */
   private blastAt(
-    x: number, y: number, radius: number, damage: number, owner: Tank,
+    x: number, y: number, baseRadius: number, damage: number, owner: Tank,
     opts: { direct?: Tank | null; splashMul?: number; healFrac?: number } = {},
   ): number {
+    const radius = baseRadius * owner.attrs.blast;
     this.terrain.carve(x, y, radius);
     this.particles.explosion(x, y, radius);
     sfx.explosion(clamp(radius / 90, 0.2, 1));
@@ -657,7 +901,11 @@ export class Game {
   }
 
   private applyDamage(tank: Tank, rawDmg: number, source: Tank): void {
-    let dmg = Math.round(rawDmg);
+    // Self-inflicted damage (falls, own blast) ignores the attacker bonus but
+    // still respects the victim's armour.
+    let dmg = rawDmg;
+    if (source !== tank) dmg *= source.attrs.damage;
+    dmg = Math.round(dmg * tank.attrs.armor);
     if (source.isJuggernaut && tank !== source) dmg = Math.round(dmg * 1.4);
     tank.hp = Math.max(0, tank.hp - dmg);
     if (tank.isEnemyOf(source)) {
@@ -678,6 +926,22 @@ export class Game {
         if (killer.lastDamagedBy === tank) this.shot.revenge = true;
       }
     }
+    // Record the killing shot for replay — first kill of the turn wins the cut.
+    if (
+      this.settings.cinematics !== false && killer && killer !== tank
+      && !this.pendingKillCam && this.shotPath.length > 3
+    ) {
+      this.pendingKillCam = {
+        path: this.shotPath.slice(),
+        trailColor: this.shotTrailColor,
+        ghosts: this.shotGhosts.slice(),
+        killAt: { x: tank.x, y: tank.y - 8 },
+        victimName: tank.name,
+        victimColor: tank.palette.primary,
+        shooterName: killer.name,
+      };
+    }
+
     this.particles.explosion(tank.x, tank.y - 8, 55);
     this.particles.burst(tank.x, tank.y - 8, 26, 320, [tank.palette.primary, tank.palette.glow, "#ffffff"], 1.4, 4, 380, 2);
     this.particles.ring(tank.x, tank.y - 8, 150, 0.55, tank.palette.glow, 3);
@@ -713,7 +977,7 @@ export class Game {
   }
 
   private grantXp(tank: Tank, amount: number): void {
-    tank.xp += amount;
+    tank.xp += amount * tank.attrs.xp;
     const newLevel = levelForXp(tank.xp);
     if (newLevel > tank.level) {
       tank.upgradePoints += newLevel - tank.level;
@@ -830,6 +1094,15 @@ export class Game {
 
   /** Server-driven turn advance (also handles skip when snapshot is null). */
   advanceTurn(nextSeat: number, snapshot: Snapshot | null, gameOver: boolean): void {
+    // A replay is on screen — hold the hand-off until it finishes.
+    if (this.phase === "cinematic") {
+      this.queuedAdvance = { nextSeat, snapshot, gameOver };
+      return;
+    }
+    this.applyAdvance(nextSeat, snapshot, gameOver);
+  }
+
+  private applyAdvance(nextSeat: number, snapshot: Snapshot | null, gameOver: boolean): void {
     // Catch up if our sim is mid-flight (hidden tab, lag, missed frames).
     let guard = 0;
     while ((this.phase === "projectiles" || this.phase === "settle") && guard++ < 5400) {
@@ -884,9 +1157,11 @@ export class Game {
       this.keys.add(e.key.toLowerCase());
       if (e.key === "F3") { e.preventDefault(); this.ui.toggleFps(); return; }
       if (e.key.toLowerCase() === "m") sfx.toggleMute();
+      if (e.key === "Escape" && this.phase === "cinematic") { this.skipCinematic(); return; }
       if (e.key === " ") {
         e.preventDefault();
-        if (this.phase === "input" && this.isMyTurn()) this.fire();
+        if (this.phase === "cinematic") this.skipCinematic();
+        else if (this.phase === "input" && this.isMyTurn()) this.fire();
         else if (this.phase === "projectiles") this.requestSplit();
       }
       if (this.phase === "input" && this.isMyTurn()) {
@@ -908,6 +1183,7 @@ export class Game {
     }, { passive: false });
 
     this.canvas.addEventListener("pointerdown", (e) => {
+      if (this.phase === "cinematic") { this.skipCinematic(); return; }
       if (this.phase !== "input" || !this.isMyTurn()) return;
       this.aiming = true;
       this.aimFromPointer(e);
@@ -920,8 +1196,11 @@ export class Game {
 
   private aimFromPointer(e: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * WORLD_W;
-    const y = ((e.clientY - rect.top) / rect.height) * WORLD_H;
+    const sx = ((e.clientX - rect.left) / rect.width) * WORLD_W;
+    const sy = ((e.clientY - rect.top) / rect.height) * WORLD_H;
+    // Invert the camera transform so aiming is correct at any zoom.
+    const x = (sx - WORLD_W / 2) / this.cam.zoom + this.cam.x;
+    const y = (sy - WORLD_H / 2) / this.cam.zoom + this.cam.y;
     const t = this.currentTank;
     t.angle = Math.atan2(y - (t.y - 10), x - t.x);
     t.power = clamp(dist(t.x, t.y - 10, x, y) * 0.28, 1, 100);
@@ -962,6 +1241,16 @@ export class Game {
     if (this.phase === "idle" || this.phase === "gameover") {
       this.particles.update(dt);
       this.shake.update(dt);
+      return;
+    }
+
+    // Cinematics own the clock while they run: no simulation, only camera,
+    // particles and shake. catchUp fast-forwards straight past them.
+    if (this.phase === "cinematic") {
+      if (catchUp) { this.endCinematic(); return; }
+      this.particles.update(dt);
+      this.shake.update(dt);
+      this.updateCinematic(dt);
       return;
     }
 
@@ -1026,13 +1315,26 @@ export class Game {
 
     if (!this.online && t.isAI) {
       this.aiTimer += dt;
-      if (this.aiTimer > 0.9 && !this.aiPlan) {
+
+      // Phase 1 — reposition. Chosen once, then driven toward so the move is
+      // visible rather than teleporting.
+      if (this.aiMoveTarget === null) {
+        this.aiMoveTarget = planMove(t, this.tanks, this.terrain, this.wind, this.banned);
+      }
+      if (this.aiTimer < 1.25 && Math.abs(t.x - this.aiMoveTarget) > 4) {
+        t.drive(t.x < this.aiMoveTarget ? 1 : -1, this.terrain, dt);
+        return;
+      }
+
+      // Phase 2 — solve and swing onto the firing solution.
+      if (!this.aiPlan) {
         this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.banned);
         t.selectedWeapon = this.aiPlan.weaponIndex;
         this.ui.updateWeapons(t);
+        this.aiAimFrom = this.aiTimer;
       }
       if (this.aiPlan && !this.aiFired) {
-        const ease = Math.min(1, (this.aiTimer - 0.9) / 1.1);
+        const ease = Math.min(1, (this.aiTimer - this.aiAimFrom) / 1.0);
         t.angle += (this.aiPlan.angle - t.angle) * ease * 0.2;
         t.power += (this.aiPlan.power - t.power) * ease * 0.2;
         if (ease >= 1) {
@@ -1089,6 +1391,13 @@ export class Game {
         p.trail.push({ x: p.x, y: p.y });
         if (p.trail.length > 26) p.trail.shift();
       }
+    }
+
+    // Track the leading shell for the kill cam (capped so long grenade rolls
+    // can't grow the buffer without bound).
+    if (this.settings.cinematics !== false && this.shotPath.length < 900) {
+      const lead = this.projectiles.find((p) => p.alive && !p.resting);
+      if (lead) this.shotPath.push({ x: lead.x, y: lead.y });
     }
 
     this.projectiles = this.projectiles.filter((p) => p.alive);
@@ -1173,7 +1482,7 @@ export class Game {
       if (p.age > 5) { this.explode(p, null); return; }
     }
 
-    p.vx += this.wind * p.def.windMul * h;
+    p.vx += this.wind * p.def.windMul * p.owner.attrs.wind * h;
     p.vy += GRAVITY * p.def.gravityMul * h;
     p.x += p.vx * h;
     p.y += p.vy * h;
@@ -1282,6 +1591,11 @@ export class Game {
     // Pay out bonuses before any snapshot so the XP is part of the sync.
     if (this.shot) this.awardTrickShots();
 
+    // Report the turn result first, then roll the replay — the server keeps
+    // moving while every client watches the same cut.
+    const kc = this.pendingKillCam;
+    this.pendingKillCam = null;
+
     if (this.online) {
       if (this.awaitingAdvance) return;
       this.phase = "sync";
@@ -1296,8 +1610,10 @@ export class Game {
         this.online.send("turnEnd", msg);
       }
       this.awaitingAdvance = true;
+      if (kc) this.startKillCam(kc);
       return;
     }
+    if (kc) { this.startKillCam(kc); return; }
     this.nextTurn();
   }
 
@@ -1387,11 +1703,25 @@ export class Game {
     return bg;
   }
 
+  /** Applies the camera. World-space drawing happens inside this transform. */
+  private applyCamera(ctx: CanvasRenderingContext2D): void {
+    ctx.translate(WORLD_W / 2, WORLD_H / 2);
+    ctx.scale(this.cam.zoom, this.cam.zoom);
+    ctx.translate(-this.cam.x, -this.cam.y);
+    ctx.translate(this.shake.offsetX, this.shake.offsetY);
+  }
+
   draw(): void {
     const { ctx } = this;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
-    ctx.translate(this.shake.offsetX, this.shake.offsetY);
+
+    if (this.phase === "cinematic" && this.cine?.kind === "killcam") {
+      this.drawKillCam(ctx);
+      return;
+    }
+
+    this.applyCamera(ctx);
 
     ctx.drawImage(this.bg, 0, 0);
     this.terrain.draw(ctx);
@@ -1472,9 +1802,87 @@ export class Game {
     ctx.drawImage(this.vignette, 0, 0);
   }
 
+  /**
+   * Replays the killing shot against the terrain and tank poses captured at
+   * fire time, so the crater it dug isn't already on the ground.
+   */
+  private drawKillCam(ctx: CanvasRenderingContext2D): void {
+    const c = this.cine!;
+    const kc = c.killCam!;
+    const n = kc.path.length;
+
+    ctx.save();
+    this.applyCamera(ctx);
+
+    ctx.drawImage(this.bg, 0, 0);
+    if (this.preShotTerrain) ctx.drawImage(this.preShotTerrain, 0, 0);
+
+    for (const g of kc.ghosts) {
+      if (!g.alive) continue;
+      drawChassis(ctx, g.typeId, g.palette, g.x, g.y, g.facing, g.angle, TANK_RADIUS);
+      ctx.font = "700 11px ui-monospace, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.fillStyle = g.palette.glow;
+      ctx.fillText(g.name, g.x, g.y - 46);
+    }
+
+    // Shell position along the recorded path, matching updateKillCam's easing.
+    const flightTime = c.duration - 1.15;
+    const k = Math.min(1, c.t / flightTime);
+    const eased = 1 - Math.pow(1 - k, 1.7);
+    const idx = Math.min(n - 1, Math.floor(eased * Math.max(0, n - 1)));
+
+    if (n > 1) {
+      ctx.strokeStyle = kc.trailColor;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(kc.path[0].x, kc.path[0].y);
+      for (let i = 1; i <= idx; i++) ctx.lineTo(kc.path[i].x, kc.path[i].y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    if (k < 1) {
+      const p = kc.path[idx];
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = kc.trailColor;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 13, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, TAU);
+      ctx.fill();
+      ctx.globalCompositeOperation = "source-over";
+    } else {
+      // Impact marker under the fireball.
+      ctx.strokeStyle = "rgba(255,90,31,0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(kc.killAt.x, kc.killAt.y, 26 + Math.sin(c.t * 9) * 3, 0, TAU);
+      ctx.stroke();
+    }
+
+    this.particles.draw(ctx);
+    ctx.restore();
+
+    if (this.particles.flash > 0.01) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = `rgba(255, 226, 178, ${this.particles.flash * 0.32})`;
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+      ctx.restore();
+    }
+    if (this.vignette) ctx.drawImage(this.vignette, 0, 0);
+  }
+
   private drawAimGuide(ctx: CanvasRenderingContext2D, t: Tank): void {
     const def = t.weaponDef;
-    const v = t.power * POWER_TO_VELOCITY * def.speedMul;
+    const v = t.power * POWER_TO_VELOCITY * def.speedMul * t.attrs.velocity;
     let x = t.barrelTip.x, y = t.barrelTip.y;
     let vx = Math.cos(t.angle) * v;
     let vy = Math.sin(t.angle) * v;
@@ -1482,7 +1890,7 @@ export class Game {
     ctx.save();
     ctx.fillStyle = t.palette.glow;
     for (let i = 0; i < 38; i++) {
-      vx += this.wind * def.windMul * dt;
+      vx += this.wind * def.windMul * t.attrs.wind * dt;
       vy += GRAVITY * def.gravityMul * dt;
       x += vx * dt;
       y += vy * dt;

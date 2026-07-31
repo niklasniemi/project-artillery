@@ -25,7 +25,7 @@ function ensureNet(): Net {
   net.onStart = (payload: StartPayload) => {
     const settings: MatchSettings = {
       ...payload.settings,
-      players: payload.seats.map((s) => ({ name: s.name, isAI: false })),
+      players: payload.seats.map((s) => ({ name: s.name, isAI: false, loadout: s.loadout })),
     };
     ui.closeLobby();
     game.start(settings, {
@@ -80,6 +80,7 @@ const ui = new UI({
     }
   },
   onReadyToggle: () => net?.send("ready"),
+  onLoadout: (loadout) => net?.send("loadout", loadout),
   onStartOnline: () => net?.send("start"),
   onLeaveRoom: () => {
     net?.leave();

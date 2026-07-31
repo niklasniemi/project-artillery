@@ -8,6 +8,12 @@ export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+/** Smoothstep-style easing for camera moves. */
+export function easeInOut(t: number): number {
+  const k = t < 0 ? 0 : t > 1 ? 1 : t;
+  return k * k * (3 - 2 * k);
+}
+
 export function dist(x1: number, y1: number, x2: number, y2: number): number {
   return Math.hypot(x2 - x1, y2 - y1);
 }

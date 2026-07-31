@@ -92,6 +92,13 @@ export class Particles {
     p.spin = randRange(-6, 6);
   }
 
+  /** Drop every live effect — used when cutting to a replay. */
+  reset(): void {
+    for (const p of this.pool) p.active = false;
+    for (const r of this.rings) r.active = false;
+    this.flash = 0;
+  }
+
   ring(x: number, y: number, maxR: number, life: number, color: string, width = 3): void {
     const r = this.rings[this.ringCursor];
     this.ringCursor = (this.ringCursor + 1) % this.rings.length;

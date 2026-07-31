@@ -1,28 +1,21 @@
 import { Terrain } from "./terrain";
 import { WEAPONS, WeaponDef, WeaponTierStats } from "./weapons";
 import { clamp, TAU } from "./util";
+import { Loadout, TankType, TankAttrs, TankPalette, typeById, paletteFor, drawChassis } from "./tanks";
 
 export const TANK_RADIUS = 14;
-const CLIMB_LIMIT = 14;      // max pixels of slope a tank can climb per step
+const CLIMB_LIMIT = 14;       // max pixels of slope a tank can climb per step
 const FALL_DAMAGE_START = 90; // free-fall pixels before damage
-export const GRAVITY = 640;   // px/s²
 
-export interface TankPalette {
-  primary: string;
-  secondary: string;
-  glow: string;
-}
+/**
+ * Muzzle velocity and gravity are scaled together (v·k, g·k²) relative to the
+ * original tuning. That leaves trajectory shapes and the power-to-range
+ * mapping untouched while stretching flight time by 1/k, so shots read
+ * clearly instead of snapping across the map.
+ */
+export const GRAVITY = 350;
 
-export const TANK_PALETTES: TankPalette[] = [
-  { primary: "#28c7f0", secondary: "#0d5f78", glow: "#4de8ff" },
-  { primary: "#f04da0", secondary: "#78134c", glow: "#ff4dd8" },
-  { primary: "#9df04d", secondary: "#4a7813", glow: "#b6ff4d" },
-  { primary: "#f0a52d", secondary: "#784e0d", glow: "#ffc44d" },
-  { primary: "#b44df0", secondary: "#530d78", glow: "#d24dff" },
-  { primary: "#4df0b4", secondary: "#0d7853", glow: "#4dffd2" },
-  { primary: "#f0654d", secondary: "#78200d", glow: "#ff7a4d" },
-  { primary: "#e8e8f0", secondary: "#5c5c78", glow: "#ffffff" },
-];
+export type { TankPalette };
 
 export class Tank {
   x: number;
@@ -30,13 +23,17 @@ export class Tank {
   hp: number;
   maxHp: number;
   fuel: number;
-  readonly maxFuel: number;
+  maxFuel: number;
   angle = -Math.PI / 3; // radians; 0 = right, negative = up
   power = 62;           // 1..100
   alive = true;
   vy = 0;
   fallFrom = -1;
   facing: 1 | -1 = 1;
+
+  readonly type: TankType;
+  readonly attrs: TankAttrs;
+  readonly palette: TankPalette;
 
   // Game-mode roles
   seat = 0;         // stable index; equals array index locally, server seat online
@@ -55,6 +52,28 @@ export class Tank {
   selectedWeapon = 0;
   damageDealt = 0;
 
+  constructor(
+    public readonly name: string,
+    public readonly loadout: Loadout,
+    public readonly isAI: boolean,
+    x: number, y: number,
+    baseHp: number, baseFuel: number,
+  ) {
+    this.x = x; this.y = y;
+    this.type = typeById(loadout.type);
+    this.attrs = this.type.attrs;
+    this.palette = paletteFor(loadout.color);
+    this.maxHp = Math.max(1, Math.round(baseHp * this.attrs.hp));
+    this.hp = this.maxHp;
+    this.maxFuel = Math.round(baseFuel * this.attrs.fuel);
+    this.fuel = this.maxFuel;
+  }
+
+  get weaponDef(): WeaponDef { return WEAPONS[this.selectedWeapon]; }
+  get weaponStats(): WeaponTierStats {
+    return WEAPONS[this.selectedWeapon].tiers[this.weaponTiers[this.selectedWeapon]];
+  }
+
   /** Points-mode score. */
   get score(): number {
     return Math.round(this.damageDealt) + this.kills * 50;
@@ -65,27 +84,10 @@ export class Tank {
     return this.team < 0 || other.team < 0 || this.team !== other.team;
   }
 
-  constructor(
-    public readonly name: string,
-    public readonly palette: TankPalette,
-    public readonly isAI: boolean,
-    x: number, y: number,
-    maxHp: number, maxFuel: number,
-  ) {
-    this.x = x; this.y = y;
-    this.maxHp = maxHp; this.hp = maxHp;
-    this.maxFuel = maxFuel; this.fuel = maxFuel;
-  }
-
-  get weaponDef(): WeaponDef { return WEAPONS[this.selectedWeapon]; }
-  get weaponStats(): WeaponTierStats {
-    return WEAPONS[this.selectedWeapon].tiers[this.weaponTiers[this.selectedWeapon]];
-  }
-
   /** Drive along terrain. Returns true if any movement happened. */
   drive(dir: -1 | 1, terrain: Terrain, dt: number): boolean {
     if (this.fuel <= 0 || !this.alive) return false;
-    const speed = 85;
+    const speed = 85 * this.attrs.drive;
     const step = dir * speed * dt;
     const newX = clamp(this.x + step, TANK_RADIUS, terrain.width - TANK_RADIUS);
     if (newX === this.x) return false;
@@ -132,7 +134,7 @@ export class Tank {
   }
 
   get barrelTip(): { x: number; y: number } {
-    const len = 26;
+    const len = this.type.id === "howitzer" ? 36 : 26;
     return {
       x: this.x + Math.cos(this.angle) * len,
       y: this.y - 10 + Math.sin(this.angle) * len,
@@ -145,7 +147,6 @@ export class Tank {
     ctx.save();
 
     if (this.isJuggernaut) {
-      // The boss reads bigger and angrier.
       ctx.translate(x, y);
       ctx.scale(1.3, 1.3);
       ctx.translate(-x, -y);
@@ -168,66 +169,32 @@ export class Tank {
       ctx.globalAlpha = 1;
     }
 
-    // Barrel
-    ctx.strokeStyle = palette.secondary;
-    ctx.lineWidth = 5;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(x, y - 10);
-    const tip = this.barrelTip;
-    ctx.lineTo(tip.x, tip.y);
-    ctx.stroke();
-
-    // Treads
-    ctx.fillStyle = palette.secondary;
-    ctx.beginPath();
-    ctx.roundRect(x - TANK_RADIUS, y - 7, TANK_RADIUS * 2, 8, 4);
-    ctx.fill();
-
-    // Hull. A translucent outline stands in for shadowBlur, which is by far
-    // the most expensive operation in Canvas 2D at this call volume.
-    if (isCurrent) {
-      ctx.globalAlpha = 0.3;
-      ctx.fillStyle = palette.glow;
-      ctx.beginPath();
-      ctx.roundRect(x - TANK_RADIUS, y - 16, TANK_RADIUS * 2, 13, 5);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-    ctx.fillStyle = palette.primary;
-    ctx.beginPath();
-    ctx.roundRect(x - TANK_RADIUS + 2, y - 14, TANK_RADIUS * 2 - 4, 9, 4);
-    ctx.fill();
-
-    // Turret cap
-    ctx.fillStyle = palette.primary;
-    ctx.beginPath();
-    ctx.arc(x, y - 13, 5, 0, TAU);
-    ctx.fill();
+    drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS);
 
     // HP bar + name
     const w = 40;
     const frac = clamp(this.hp / this.maxHp, 0, 1);
     ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(x - w / 2, y - 34, w, 5);
-    ctx.fillStyle = frac > 0.5 ? "#6bff7e" : frac > 0.25 ? "#ffc44d" : "#ff5a5a";
-    ctx.fillRect(x - w / 2, y - 34, w * frac, 5);
-    ctx.font = "700 11px 'Avenir Next', sans-serif";
+    ctx.fillRect(x - w / 2, y - 40, w, 5);
+    ctx.fillStyle = frac > 0.5 ? "#9df04d" : frac > 0.25 ? "#ffc44d" : "#ff5a5a";
+    ctx.fillRect(x - w / 2, y - 40, w * frac, 5);
+
+    ctx.font = "700 11px ui-monospace, Menlo, monospace";
     ctx.textAlign = "center";
     ctx.fillStyle = palette.glow;
     const label = this.team >= 0 ? `${this.name} [${this.team === 0 ? "A" : "B"}]` : this.name;
-    ctx.fillText(this.isJuggernaut ? `☠ ${this.name}` : label, x, y - 40);
+    ctx.fillText(this.isJuggernaut ? `☠ ${this.name}` : label, x, y - 46);
 
     if (this.isVIP) {
       ctx.fillStyle = "#ffd700";
       ctx.beginPath();
-      ctx.moveTo(x - 8, y - 50);
-      ctx.lineTo(x - 8, y - 58);
-      ctx.lineTo(x - 4, y - 53);
-      ctx.lineTo(x, y - 59);
-      ctx.lineTo(x + 4, y - 53);
-      ctx.lineTo(x + 8, y - 58);
-      ctx.lineTo(x + 8, y - 50);
+      ctx.moveTo(x - 8, y - 56);
+      ctx.lineTo(x - 8, y - 64);
+      ctx.lineTo(x - 4, y - 59);
+      ctx.lineTo(x, y - 65);
+      ctx.lineTo(x + 4, y - 59);
+      ctx.lineTo(x + 8, y - 64);
+      ctx.lineTo(x + 8, y - 56);
       ctx.closePath();
       ctx.fill();
     }
@@ -264,7 +231,7 @@ export class Crate {
     const { x, y } = this;
     ctx.save();
     if (!this.landed) {
-      ctx.strokeStyle = "rgba(232,244,255,0.8)";
+      ctx.strokeStyle = "rgba(236,228,210,0.8)";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(x, y - 16, 14, Math.PI * 1.1, Math.PI * 1.9);
@@ -272,19 +239,16 @@ export class Crate {
       ctx.moveTo(x + 12, y - 22); ctx.lineTo(x + 6, y - 6);
       ctx.stroke();
     }
-    const color = this.kind === "health" ? "#6bff7e" : this.kind === "fuel" ? "#ffc44d" : "#4de8ff";
-    ctx.fillStyle = "#1c2244";
+    const color = this.kind === "health" ? "#9df04d" : this.kind === "fuel" ? "#ffc44d" : "#4de8ff";
+    ctx.fillStyle = "#1c1913";
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 10;
     ctx.beginPath();
-    ctx.roundRect(x - 9, y - 8, 18, 16, 3);
+    ctx.rect(x - 9, y - 8, 18, 16);
     ctx.fill();
     ctx.stroke();
-    ctx.shadowBlur = 0;
     ctx.fillStyle = color;
-    ctx.font = "700 11px sans-serif";
+    ctx.font = "700 10px ui-monospace, Menlo, monospace";
     ctx.textAlign = "center";
     ctx.fillText(this.kind === "health" ? "+" : this.kind === "fuel" ? "F" : "XP", x, y + 4);
     ctx.restore();

@@ -4,11 +4,27 @@ import { TerrainType } from "./terrain";
 import { formatDeg } from "./util";
 import { sfx } from "./audio";
 import { storedServerUrl, setStoredServerUrl, resolveServerUrl } from "./net";
+import { TANK_TYPES, TANK_COLORS, Loadout, typeById, paletteFor, drawChassis } from "./tanks";
 
 export type GameMode = "deathmatch" | "points" | "juggernaut" | "assassination";
 
+export interface MatchPlayer {
+  name: string;
+  isAI: boolean;
+  loadout?: Loadout;
+}
+
+export interface CinematicCard {
+  name: string;
+  type: string;
+  role: string;
+  color: string;
+  index: number;
+  total: number;
+}
+
 export interface MatchSettings {
-  players: { name: string; isAI: boolean }[];
+  players: MatchPlayer[];
   mode: GameMode;
   rounds: number;      // points mode: turns per tank
   startHp: number;
@@ -18,6 +34,7 @@ export interface MatchSettings {
   terrainType: TerrainType;
   crates: boolean;
   bannedWeapons: number[];
+  cinematics: boolean;
 }
 
 export interface LobbyPlayer {
@@ -26,6 +43,7 @@ export interface LobbyPlayer {
   ready: boolean;
   isHost: boolean;
   isMe: boolean;
+  loadout?: Loadout;
 }
 
 export interface LobbyView {
@@ -46,6 +64,7 @@ interface UICallbacks {
   onReadyToggle: () => void;
   onStartOnline: () => void;
   onLeaveRoom: () => void;
+  onLoadout: (loadout: Loadout) => void;
 }
 
 const MODES: { id: GameMode; num: string; name: string; brief: string }[] = [
@@ -215,6 +234,7 @@ export class UI {
       terrainType: bankVal("terrain") as TerrainType,
       crates: bankVal("crates") === "on",
       bannedWeapons: [...this.banned],
+      cinematics: bankVal("cine") === "on",
     };
   }
 
@@ -248,6 +268,10 @@ export class UI {
         { value: "8", label: "8" },
         { value: "12", label: "12" },
       ], "8")}
+      ${bank("cine", "Cinematics", [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+      ], "on")}
       ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
       ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}
       <div class="section-break"><span>Armory · click to ban</span></div>
@@ -350,8 +374,22 @@ export class UI {
         for (let i = 2; i <= humans; i++) players.push({ name: `Player ${i}`, isAI: false });
       }
       const settings = this.readSettings(localPane, players);
-      this.menu.innerHTML = "";
-      this.cb.onStart(settings);
+      // Each human picks a chassis in turn before the match opens.
+      const humans = players.filter((p) => !p.isAI);
+      const runPick = (i: number): void => {
+        if (i >= humans.length) {
+          this.menu.innerHTML = "";
+          this.cb.onStart(settings);
+          return;
+        }
+        const p = humans[i];
+        this.showTankSelect(`${p.name} · select chassis`, this.loadStoredLoadout(i), (l) => {
+          p.loadout = l;
+          this.storeLoadout(i, l);
+          runPick(i + 1);
+        });
+      };
+      runPick(0);
     };
 
     const serverInput = this.menu.querySelector<HTMLInputElement>("#o-server")!;
@@ -389,6 +427,137 @@ export class UI {
     };
   }
 
+  // ---------- Tank selector ----------
+
+  /** Remembers each seat's last loadout so repeat matches are one click. */
+  loadStoredLoadout(slot: number): Loadout {
+    try {
+      const raw = localStorage.getItem(`pa-loadout-${slot}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Loadout;
+        if (typeof parsed.type === "string" && typeof parsed.color === "number") {
+          return { type: typeById(parsed.type).id, color: parsed.color };
+        }
+      }
+    } catch {
+      /* corrupt or unavailable storage — fall through to the default */
+    }
+    return { type: TANK_TYPES[0].id, color: slot % TANK_COLORS.length };
+  }
+
+  storeLoadout(slot: number, l: Loadout): void {
+    try {
+      localStorage.setItem(`pa-loadout-${slot}`, JSON.stringify(l));
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /**
+   * Chassis + livery picker. Runs modally; `onDone` receives the loadout.
+   * Used for each local human in turn and from the online lobby.
+   */
+  showTankSelect(title: string, initial: Loadout, onDone: (l: Loadout) => void): void {
+    const pick: Loadout = { ...initial };
+    const host = this.menu.innerHTML ? this.menu : this.hud;
+    const overlay = document.createElement("div");
+    overlay.className = "overlay";
+
+    const typeRows = TANK_TYPES.map((t) => `
+      <button type="button" class="chassis" data-type="${t.id}">
+        <span class="cx-name">${t.name}</span>
+        <span class="cx-role">${t.role}</span>
+      </button>`).join("");
+
+    const swatches = TANK_COLORS.map((c, i) => `
+      <button type="button" class="swatch-btn" data-color="${i}" style="--sw:${c}"></button>`).join("");
+
+    overlay.innerHTML = `
+      <div class="panel wide select-panel">
+        <div class="subtitle" style="margin:0 0 2px">Chassis assignment</div>
+        <h2 id="ts-title">${title}</h2>
+        <div class="select-grid">
+          <div class="chassis-list">${typeRows}</div>
+          <div class="preview-col">
+            <canvas class="preview" id="ts-preview" width="460" height="290"></canvas>
+            <div class="preview-brief" id="ts-brief"></div>
+            <div class="swatches">${swatches}</div>
+          </div>
+          <div class="stats" id="ts-stats"></div>
+        </div>
+        <button class="btn fire-key" id="ts-confirm" style="margin-top:16px">Confirm ▸</button>
+      </div>`;
+
+    host.appendChild(overlay);
+
+    const canvas = overlay.querySelector<HTMLCanvasElement>("#ts-preview")!;
+    const pctx = canvas.getContext("2d")!;
+    const brief = overlay.querySelector<HTMLElement>("#ts-brief")!;
+    const statsEl = overlay.querySelector<HTMLElement>("#ts-stats")!;
+
+    const STAT_ROWS: { label: string; get: (a: Record<string, number>) => number }[] = [
+      { label: "Hull", get: (a) => a.hp },
+      { label: "Fuel", get: (a) => a.fuel },
+      { label: "Speed", get: (a) => a.drive },
+      { label: "Damage", get: (a) => a.damage },
+      // Armour is stored as damage taken — invert so longer bars read better.
+      { label: "Armour", get: (a) => 2 - a.armor },
+      { label: "Blast", get: (a) => a.blast },
+      { label: "Muzzle", get: (a) => a.velocity },
+      { label: "Wind hold", get: (a) => 2 - a.wind },
+    ];
+
+    const render = (): void => {
+      const type = typeById(pick.type);
+      const pal = paletteFor(pick.color);
+
+      overlay.querySelectorAll<HTMLElement>(".chassis").forEach((b) =>
+        b.classList.toggle("on", b.dataset.type === pick.type));
+      overlay.querySelectorAll<HTMLElement>(".swatch-btn").forEach((b) =>
+        b.classList.toggle("on", Number(b.dataset.color) === pick.color));
+
+      brief.textContent = type.brief;
+
+      const a = type.attrs as unknown as Record<string, number>;
+      statsEl.innerHTML = STAT_ROWS.map((r) => {
+        const v = r.get(a);
+        // 0.55–1.6 spans the full range of values any chassis uses.
+        const pct = Math.max(4, Math.min(100, ((v - 0.55) / 1.05) * 100));
+        const cls = v > 1.04 ? "up" : v < 0.96 ? "down" : "";
+        return `
+          <div class="stat">
+            <span class="label">${r.label}</span>
+            <div class="stat-bar"><i class="${cls}" style="width:${pct}%"></i></div>
+          </div>`;
+      }).join("");
+
+      pctx.clearRect(0, 0, canvas.width, canvas.height);
+      const groundY = 218;
+      // Ground line so the chassis has something to sit on.
+      pctx.strokeStyle = "rgba(139,130,112,0.55)";
+      pctx.lineWidth = 1.5;
+      pctx.beginPath();
+      pctx.moveTo(40, groundY);
+      pctx.lineTo(420, groundY);
+      pctx.stroke();
+      drawChassis(pctx, type.id, pal, 215, groundY, 1, -0.62, 52);
+    };
+
+    overlay.querySelectorAll<HTMLButtonElement>(".chassis").forEach((btn) => {
+      btn.onclick = () => { pick.type = btn.dataset.type!; sfx.ui(); render(); };
+    });
+    overlay.querySelectorAll<HTMLButtonElement>(".swatch-btn").forEach((btn) => {
+      btn.onclick = () => { pick.color = Number(btn.dataset.color); sfx.ui(); render(); };
+    });
+    overlay.querySelector<HTMLButtonElement>("#ts-confirm")!.onclick = () => {
+      sfx.ui();
+      overlay.remove();
+      onDone(pick);
+    };
+
+    render();
+  }
+
   netStatus(text: string, ok = false): void {
     const el = this.menu.querySelector<HTMLElement>("#o-status")
       ?? this.lobbyOverlay?.querySelector<HTMLElement>(".net-status");
@@ -409,9 +578,9 @@ export class UI {
     const rows = view.players.map((p) => `
       <div class="score-row">
         <span class="rank">${String(p.seat + 1).padStart(2, "0")}</span>
-        <span class="swatch" style="background:${PALETTE_HEX[p.seat % 8]}"></span>
+        <span class="swatch" style="background:${p.loadout ? TANK_COLORS[p.loadout.color % TANK_COLORS.length] : PALETTE_HEX[p.seat % 8]}"></span>
         <span class="sname">${p.name}${p.isMe ? " ·you" : ""}</span>
-        <span class="sval">${p.isHost ? "HOST" : p.ready ? "READY" : "standby"}</span>
+        <span class="sval">${p.loadout ? typeById(p.loadout.type).name + " · " : ""}${p.isHost ? "HOST" : p.ready ? "READY" : "standby"}</span>
       </div>`).join("");
     const s = view.settings;
     const summary = s
@@ -427,11 +596,20 @@ export class UI {
           ${view.iAmHost
             ? `<button class="btn fire-key" id="l-start" style="margin-top:0" ${allReady ? "" : "disabled"}>Launch Operation ▸</button>`
             : `<button class="btn" id="l-ready">${me?.ready ? "Stand Down" : "Ready Up"}</button>`}
+          <button class="btn small" id="l-tank">Chassis</button>
           <button class="btn small" id="l-leave">Withdraw</button>
         </div>
         <div class="net-status"></div>
       </div>`;
     overlay.querySelector<HTMLButtonElement>("#l-leave")!.onclick = () => { sfx.ui(); this.cb.onLeaveRoom(); };
+    overlay.querySelector<HTMLButtonElement>("#l-tank")!.onclick = () => {
+      sfx.ui();
+      const current = me?.loadout ?? this.loadStoredLoadout(0);
+      this.showTankSelect("Select chassis", current, (l) => {
+        this.storeLoadout(0, l);
+        this.cb.onLoadout(l);
+      });
+    };
     overlay.querySelector<HTMLButtonElement>("#l-ready")?.addEventListener("click", () => { sfx.ui(); this.cb.onReadyToggle(); });
     overlay.querySelector<HTMLButtonElement>("#l-start")?.addEventListener("click", () => { sfx.ui(); this.cb.onStartOnline(); });
     this.hud.appendChild(overlay);
@@ -595,6 +773,46 @@ export class UI {
     const showing = this.fpsEl.style.display === "none";
     this.fpsEl.style.display = showing ? "" : "none";
     return showing;
+  }
+
+  // ---------- Cinematic overlay ----------
+
+  /** Letterbox bars + label. Hides the playing HUD while a cut runs. */
+  setCinematic(on: boolean, label = ""): void {
+    let el = this.hud.querySelector<HTMLElement>(".cine");
+    if (on) {
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "cine";
+        el.innerHTML = `
+          <div class="cine-bar top"><span class="cine-label"></span><span class="cine-skip">Space · skip</span></div>
+          <div class="cine-card" style="display:none"></div>
+          <div class="cine-bar bottom"></div>`;
+        this.hud.appendChild(el);
+      }
+      el.querySelector<HTMLElement>(".cine-label")!.textContent = label;
+      this.hud.classList.add("cinematic");
+    } else {
+      el?.remove();
+      this.hud.classList.remove("cinematic");
+    }
+  }
+
+  setCinematicCard(card: CinematicCard | null): void {
+    const el = this.hud.querySelector<HTMLElement>(".cine-card");
+    if (!el) return;
+    if (!card) { el.style.display = "none"; return; }
+    el.style.display = "";
+    el.style.setProperty("--accent", card.color);
+    const counter = card.total > 0
+      ? `<span class="cc-count">${String(card.index).padStart(2, "0")}/${String(card.total).padStart(2, "0")}</span>`
+      : "";
+    el.innerHTML = `
+      ${counter}
+      <div class="cc-body">
+        <div class="cc-name">${card.name}</div>
+        <div class="cc-meta"><b>${card.type}</b> · ${card.role}</div>
+      </div>`;
   }
 
   banner(text: string, color: string): void {
