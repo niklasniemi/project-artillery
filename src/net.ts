@@ -59,6 +59,16 @@ export function resolveServerUrl(): string {
   return isLocalPage ? "ws://localhost:2567" : "";
 }
 
+export interface PublicRoom {
+  id: string;
+  players: number;
+  maxPlayers: number;
+  host: string;
+  mode: string;
+  map: string;
+  terrain: string;
+}
+
 export interface StartPayload {
   seed: number;
   settings: MatchSettings;
@@ -118,8 +128,24 @@ export class Net {
   }
 
   async create(name: string, settings: MatchSettings): Promise<void> {
-    this.room = await this.clientFor().create("artillery", { name, settings });
+    this.room = await this.clientFor().create("artillery", {
+      name, settings, visibility: settings.visibility ?? "public",
+    });
     this.wire();
+  }
+
+  /**
+   * Open public rooms. Colyseus 0.16 dropped client-side room listing, so the
+   * server exposes its own `/rooms` endpoint next to the websocket transport.
+   */
+  async listRooms(): Promise<PublicRoom[]> {
+    const ws = resolveServerUrl();
+    if (!ws) throw new Error("No server configured");
+    const httpBase = ws.replace(/^ws/, "http");
+    const res = await fetch(`${httpBase}/rooms`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Room list failed (${res.status})`);
+    const body = (await res.json()) as { rooms?: PublicRoom[] };
+    return body.rooms ?? [];
   }
 
   async join(name: string, code: string): Promise<void> {

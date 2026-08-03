@@ -1,4 +1,5 @@
 import { Room, Client } from "colyseus";
+import { publish, unpublish } from "./registry";
 
 interface Loadout {
   type: string;
@@ -25,12 +26,21 @@ export class ArtilleryRoom extends Room {
   private players = new Map<string, PlayerInfo>();
   private hostId = "";
   private phase: "lobby" | "playing" = "lobby";
-  private settings: { turnSeconds?: number } | null = null;
+  private isPublic = true;
+  private settings: {
+    turnSeconds?: number; mode?: string; mapTheme?: string; terrainType?: string;
+  } | null = null;
   private currentSeat = 0;
   private turnTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  onCreate(options: { name?: string; settings?: { turnSeconds?: number } }): void {
+  onCreate(options: {
+    name?: string;
+    visibility?: string;
+    settings?: { turnSeconds?: number; mode?: string; mapTheme?: string; terrainType?: string };
+  }): void {
     this.settings = options?.settings ?? null;
+    // Private rooms are reachable by id but never appear in the browser.
+    this.isPublic = options?.visibility !== "private";
 
     this.onMessage("settings", (client, s: { turnSeconds?: number }) => {
       if (client.sessionId !== this.hostId || this.phase !== "lobby") return;
@@ -121,6 +131,7 @@ export class ArtilleryRoom extends Room {
 
   onDispose(): void {
     this.clearTimer();
+    unpublish(this.roomId);
   }
 
   // ---------- Match flow ----------
@@ -136,6 +147,8 @@ export class ArtilleryRoom extends Room {
 
     this.phase = "playing";
     this.lock();
+    // Drop out of the browser for the duration of the match.
+    unpublish(this.roomId);
     const seed = Math.floor(Math.random() * 1e9);
     const seats = list
       .sort((a, b) => a.seat - b.seat)
@@ -210,7 +223,27 @@ export class ArtilleryRoom extends Room {
     this.turnTimeout = null;
   }
 
+  /** What the room browser shows for this room. */
+  private publishMetadata(): void {
+    // Only listed while public, waiting in the lobby, and not yet full.
+    if (!this.isPublic || this.phase !== "lobby" || this.players.size === 0) {
+      unpublish(this.roomId);
+      return;
+    }
+    const host = this.players.get(this.hostId);
+    publish({
+      id: this.roomId,
+      host: host?.name ?? "—",
+      players: this.players.size,
+      maxPlayers: this.maxClients,
+      mode: this.settings?.mode ?? "deathmatch",
+      map: this.settings?.mapTheme ?? "nightfall",
+      terrain: this.settings?.terrainType ?? "hilly",
+    });
+  }
+
   private broadcastLobby(): void {
+    this.publishMetadata();
     this.broadcast("lobby", {
       code: this.roomId,
       hostId: this.hostId,

@@ -46,6 +46,7 @@ export interface MatchSettings {
   friendlyFire: boolean;
   startLevel: number;
   fuelResupply: "off" | "partial" | "full";
+  visibility: "public" | "private";
 }
 
 export interface LobbyPlayer {
@@ -76,6 +77,17 @@ interface UICallbacks {
   onStartOnline: () => void;
   onLeaveRoom: () => void;
   onLoadout: (loadout: Loadout) => void;
+  onListRooms: () => Promise<PublicRoomView[]>;
+}
+
+export interface PublicRoomView {
+  id: string;
+  players: number;
+  maxPlayers: number;
+  host: string;
+  mode: string;
+  map: string;
+  terrain: string;
 }
 
 const MODES: { id: GameMode; num: string; name: string; brief: string }[] = [
@@ -278,6 +290,9 @@ export class UI {
       friendlyFire: bankVal("ff") === "on",
       startLevel: parseInt(bankVal("startlvl"), 10),
       fuelResupply: bankVal("resupply") as MatchSettings["fuelResupply"],
+      // Only the host flow carries this switch; local play defaults to public.
+      visibility: (root.querySelector<HTMLElement>('[data-bank="visibility"]')?.dataset.value
+        ?? "public") as MatchSettings["visibility"],
     };
   }
 
@@ -427,13 +442,19 @@ export class UI {
             <div class="flow" id="o-flow-join" style="display:none">
               <button type="button" class="backlink" data-back>◂ Back</button>
               <h3 class="flow-title">Join a game</h3>
-              <p class="flow-help">Ask the host for their room code — it appears at the
-                top of their lobby screen. Type or paste it below.</p>
+              <p class="flow-help">Pick an open game below, or enter a code if a friend
+                is hosting privately.</p>
+              <div class="list-head">
+                <span class="label">Open games</span>
+                <button type="button" class="btn small" id="o-refresh">Refresh</button>
+              </div>
+              <div class="roomlist" id="o-rooms"></div>
+              <div class="section-break"><span>or join with a code</span></div>
               <div class="field">
                 <span class="label">Room code</span>
                 <input type="text" id="o-code" maxlength="14" placeholder="e.g. A4VRp30s2" />
               </div>
-              <button class="btn fire-key" id="o-join">Join game ▸</button>
+              <button class="btn fire-key" id="o-join">Join with code ▸</button>
             </div>
 
             <!-- Step 2b: host -->
@@ -442,6 +463,10 @@ export class UI {
               <h3 class="flow-title">Host a game</h3>
               <p class="flow-help">Pick your rules, then share the room code with your
                 friends. You can still change your tank in the lobby.</p>
+              ${bank("visibility", "Who can join", [
+                { value: "public", label: "Anyone (listed)" },
+                { value: "private", label: "Code only" },
+              ], "public")}
               ${this.controlSurface("online")}
               <button class="btn fire-key" id="o-create">Create room ▸</button>
             </div>
@@ -517,8 +542,13 @@ export class UI {
       flowJoin.style.display = which === "join" ? "" : "none";
       this.netStatus("");
       if (which === "join") {
+        void this.refreshRooms();
         this.menu.querySelector<HTMLInputElement>("#o-code")?.focus();
       }
+    };
+    this.menu.querySelector<HTMLButtonElement>("#o-refresh")!.onclick = () => {
+      sfx.ui();
+      void this.refreshRooms();
     };
     choice.querySelectorAll<HTMLButtonElement>(".choice-card").forEach((btn) => {
       btn.onclick = () => {
@@ -706,6 +736,43 @@ export class UI {
     render();
   }
 
+  /** Pulls the open-games list and renders it, with join buttons per row. */
+  private async refreshRooms(): Promise<void> {
+    const list = this.menu.querySelector<HTMLElement>("#o-rooms");
+    if (!list) return;
+    list.innerHTML = `<div class="room-empty">Looking for open games…</div>`;
+    let rooms: PublicRoomView[];
+    try {
+      rooms = await this.cb.onListRooms();
+    } catch {
+      list.innerHTML = `<div class="room-empty">Could not reach the server. Check Connection settings below.</div>`;
+      return;
+    }
+    if (!this.menu.querySelector("#o-rooms")) return; // navigated away mid-request
+    if (rooms.length === 0) {
+      list.innerHTML = `<div class="room-empty">No open games right now — host one, or join with a code.</div>`;
+      return;
+    }
+    list.innerHTML = rooms.map((r) => `
+      <div class="room-row">
+        <span class="rm-host">${r.host}</span>
+        <span class="rm-meta">${r.mode} · ${r.map} · ${r.terrain}</span>
+        <span class="rm-count">${r.players}/${r.maxPlayers}</span>
+        <button class="btn small" data-room="${r.id}" ${r.players >= r.maxPlayers ? "disabled" : ""}>
+          ${r.players >= r.maxPlayers ? "Full" : "Join"}
+        </button>
+      </div>`).join("");
+    list.querySelectorAll<HTMLButtonElement>("button[data-room]").forEach((btn) => {
+      btn.onclick = () => {
+        sfx.unlock(); sfx.ui();
+        const name = (this.menu.querySelector<HTMLInputElement>("#o-name")!.value.trim() || "Gunner").slice(0, 14);
+        localStorage.setItem("pa-name", name);
+        this.netStatus("Joining…");
+        this.cb.onJoinRoom(name, btn.dataset.room!);
+      };
+    });
+  }
+
   netStatus(text: string, ok = false): void {
     const el = this.menu.querySelector<HTMLElement>("#o-status")
       ?? this.lobbyOverlay?.querySelector<HTMLElement>(".net-status");
@@ -810,7 +877,7 @@ export class UI {
       <div class="controls-hint">
         <kbd>←→</kbd> drive · <kbd>↑↓</kbd> elev · <kbd>W/S</kbd> charge · <kbd>Space</kbd> fire<br/>
         <kbd>1–0</kbd> or <kbd>Q/E</kbd> ordnance · <kbd>U</kbd> upgrade · <kbd>M</kbd> mute<br/>
-        <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> look around · <kbd>C</kbd> recentre
+        <kbd>wheel</kbd> zoom · <kbd>drag</kbd> the ground to look around · <kbd>C</kbd> recentre
       </div>`;
 
     this.turnName = this.hud.querySelector("#t-name")!;
@@ -923,7 +990,7 @@ export class UI {
     if (!el) return;
     if (zoom <= 1.02) { el.style.display = "none"; return; }
     el.style.display = "";
-    el.innerHTML = `SCOUT VIEW ×${zoom.toFixed(1)} · <b>C</b> to recentre`;
+    el.innerHTML = `SCOUT VIEW ×${zoom.toFixed(1)} · drag to look · <b>C</b> to recentre`;
   }
 
   /** F3 toggles the perf readout — off by default. */

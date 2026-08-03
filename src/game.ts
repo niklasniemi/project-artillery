@@ -482,6 +482,7 @@ export class Game {
 
   private panCamera(dxScreen: number, dyScreen: number): void {
     if (this.phase === "cinematic") return;
+    if (!Number.isFinite(dxScreen) || !Number.isFinite(dyScreen)) return;
     this.cam.x -= dxScreen / this.cam.zoom;
     this.cam.y -= dyScreen / this.cam.zoom;
     this.clampCamera();
@@ -1275,12 +1276,17 @@ export class Game {
 
     this.canvas.addEventListener("pointerdown", (e) => {
       if (this.phase === "cinematic") { this.skipCinematic(); return; }
-      if (e.button === 2 || e.button === 1) {
+      const startPan = (): void => {
         this.camPanning = true;
         this.panLastX = e.clientX;
         this.panLastY = e.clientY;
-        return;
-      }
+        this.canvas.style.cursor = "grabbing";
+      };
+      // Middle/right always grabs the world.
+      if (e.button === 2 || e.button === 1) { startPan(); return; }
+      // Left button: grabbing the world pans, but only once scouted in, and
+      // never when the drag starts on your own tank — that is still aiming.
+      if (this.canGrabWorld(e)) { startPan(); return; }
       if (this.phase !== "input" || !this.isMyTurn()) return;
       this.aiming = true;
       this.aimFromPointer(e);
@@ -1295,16 +1301,44 @@ export class Game {
         return;
       }
       if (this.aiming) this.aimFromPointer(e);
+      else this.updateCursor(e);
     });
     window.addEventListener("pointerup", () => {
       this.aiming = false;
-      this.camPanning = false;
+      if (this.camPanning) {
+        this.camPanning = false;
+        this.canvas.style.cursor = "";
+      }
     });
   }
 
-  /** Client coordinates to world-canvas coordinates. */
+  /**
+   * True when a left-drag here should grab the world instead of aiming.
+   * Only while scouted in, and never within reach of the tank you control —
+   * at default zoom this is always false, so aiming behaves exactly as before.
+   */
+  private canGrabWorld(e: PointerEvent): boolean {
+    if (this.cam.zoom <= 1.02) return false;
+    const t = this.currentTank;
+    if (!t || this.phase !== "input" || !this.isMyTurn()) return true;
+    const p = this.canvasPoint(e.clientX, e.clientY);
+    const w = this.screenToWorld(p.x, p.y);
+    return dist(w.x, w.y, t.x, t.y - 10) > 90;
+  }
+
+  private updateCursor(e: PointerEvent): void {
+    if (this.phase === "cinematic") { this.canvas.style.cursor = ""; return; }
+    this.canvas.style.cursor = this.canGrabWorld(e) ? "grab" : "crosshair";
+  }
+
+  /**
+   * Client coordinates to world-canvas coordinates. Falls back to the centre
+   * if the canvas has no layout box yet — dividing by a zero-width rect would
+   * yield NaN, and a NaN reaching the camera would blank the screen for good.
+   */
   private canvasPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return { x: WORLD_W / 2, y: WORLD_H / 2 };
     return {
       x: ((clientX - rect.left) / rect.width) * WORLD_W,
       y: ((clientY - rect.top) / rect.height) * WORLD_H,

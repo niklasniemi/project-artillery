@@ -8,11 +8,20 @@ canvas.height = WORLD_H;
 const ctx = canvas.getContext("2d")!;
 
 function resize(): void {
-  const scale = Math.min(window.innerWidth / WORLD_W, window.innerHeight / WORLD_H);
+  const w = window.innerWidth || document.documentElement.clientWidth;
+  const h = window.innerHeight || document.documentElement.clientHeight;
+  if (w < 1 || h < 1) return; // no layout box yet — try again when there is one
+  const scale = Math.min(w / WORLD_W, h / WORLD_H);
   canvas.style.width = `${WORLD_W * scale}px`;
   canvas.style.height = `${WORLD_H * scale}px`;
 }
 window.addEventListener("resize", resize);
+// A plain resize listener misses the case where the page is laid out *after*
+// load (hidden tab, embedded frame, late-sized container), which would leave
+// the canvas stuck at zero size with no way to recover.
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(resize).observe(document.documentElement);
+}
 resize();
 
 let game: Game;
@@ -81,6 +90,7 @@ const ui = new UI({
   },
   onReadyToggle: () => net?.send("ready"),
   onLoadout: (loadout) => net?.send("loadout", loadout),
+  onListRooms: () => ensureNet().listRooms(),
   onStartOnline: () => net?.send("start"),
   onLeaveRoom: () => {
     net?.leave();

@@ -583,6 +583,46 @@ body::after {
   text-transform: uppercase; color: var(--hazard);
 }
 
+.list-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.roomlist { display: flex; flex-direction: column; gap: 3px; }
+.room-row {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr auto auto;
+  align-items: center; gap: 12px;
+  padding: 9px 12px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--char-2);
+  border-left: 3px solid var(--hazard);
+  transition: background 0.1s;
+}
+.room-row:hover { background: rgba(255,90,31,0.08); }
+.rm-host {
+  font-size: 12px; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--paper);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rm-meta {
+  font-size: 9px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--paper-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rm-count {
+  font-family: var(--display); font-size: 17px;
+  color: var(--acid); font-variant-numeric: tabular-nums;
+}
+.room-empty {
+  padding: 16px 12px;
+  font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--paper-4);
+  background: rgba(0,0,0,0.22);
+  border: 1px dashed var(--char-2);
+  text-align: center;
+}
+
 .flow { margin-top: 6px; }
 .flow-title {
   font-family: var(--display); font-weight: 400;

@@ -35,10 +35,23 @@ cd server && npm install && npm run dev
 ```
 
 Then open **§2 Online Play**, enter your name and pick one of two paths:
-**Host a game** (choose the rules, get a room code to share) or **Join a game**
-(paste the code a friend sent you). The connection settings row is collapsed
-unless no server is configured. The client connects to `ws://localhost:2567` by
-default; set `VITE_SERVER_URL` to point elsewhere.
+
+- **Host a game** — choose the rules and whether the room is listed publicly or
+  reachable by code only, then share the code shown in your lobby.
+- **Join a game** — pick a room straight from the open-games list, or enter a
+  code if your friend is hosting privately.
+
+The connection settings row is collapsed unless no server is configured. The
+client connects to `ws://localhost:2567` by default; set `VITE_SERVER_URL` to
+point elsewhere.
+
+**Room browser.** Colyseus 0.16 removed client-side room listing, so the server
+serves its own `GET /rooms` endpoint alongside the websocket transport, backed
+by an in-process registry ([server/src/registry.ts](server/src/registry.ts)).
+Rooms are listed only while public, waiting in the lobby and not full, and they
+drop out of the list for the duration of a match. This is single-process by
+design, matching how the game is deployed; a multi-node setup would need shared
+presence instead.
 
 ### Deploy the server to Render
 
@@ -82,7 +95,7 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | Space mid-air | Trigger Splitter split |
 | 1–0, Q / E, or click | Select weapon (Q/E cycles all 20, skipping bans) |
 | Mouse wheel | Zoom the scouting camera (1×–4×) |
-| Right-drag | Look around the battlefield |
+| Drag the ground | Look around (while zoomed in; right-drag works at any zoom) |
 | C | Recentre the camera |
 | M | Mute audio |
 | F3 | Frame-rate / quality readout |
