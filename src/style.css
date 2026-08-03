@@ -539,6 +539,86 @@ body::after {
       transparent calc(50% + 1px));
 }
 
+/* ---------- Online: host-or-join flow ---------- */
+
+.choice {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 12px; margin-top: 18px;
+}
+.choice-card {
+  position: relative;
+  appearance: none; cursor: pointer; text-align: left;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--paper-4);
+  padding: 20px 18px 16px;
+  font-family: var(--mono);
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
+}
+.choice-card:hover {
+  background: rgba(255,90,31,0.09);
+  border-color: var(--hazard);
+  transform: translateY(-2px);
+}
+.ch-num {
+  position: absolute; top: 12px; right: 14px;
+  font-family: var(--display); font-size: 34px;
+  color: var(--char-2);
+}
+.choice-card:hover .ch-num { color: var(--hazard); }
+.ch-title {
+  display: block;
+  font-family: var(--display); font-size: 25px;
+  letter-spacing: 0.02em; text-transform: uppercase;
+  color: var(--paper);
+}
+.ch-desc {
+  display: block; margin-top: 7px;
+  font-size: 10px; line-height: 1.7;
+  letter-spacing: 0.06em; color: var(--paper-3);
+  max-width: 30ch;
+}
+.ch-go {
+  display: block; margin-top: 14px;
+  font-size: 10px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--hazard);
+}
+
+.flow { margin-top: 6px; }
+.flow-title {
+  font-family: var(--display); font-weight: 400;
+  font-size: 26px; letter-spacing: 0.02em;
+  text-transform: uppercase; color: var(--paper);
+  margin: 10px 0 6px;
+}
+.flow-help {
+  font-size: 10px; line-height: 1.8;
+  letter-spacing: 0.06em; color: var(--paper-3);
+  margin-bottom: 16px; max-width: 62ch;
+}
+.backlink {
+  appearance: none; background: none; border: 0;
+  cursor: pointer; padding: 0;
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--paper-4);
+}
+.backlink:hover { color: var(--hazard); }
+
+.conn {
+  margin-top: 20px;
+  border-top: 1px dotted rgba(139,130,112,0.3);
+  padding-top: 12px;
+}
+.conn summary {
+  cursor: pointer; list-style: none;
+  font-size: 9px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--paper-4);
+}
+.conn summary::-webkit-details-marker { display: none; }
+.conn summary::before { content: "▸ "; }
+.conn[open] summary::before { content: "▾ "; }
+.conn summary:hover { color: var(--paper-2); }
+
 /* ---------- Tank selector ---------- */
 
 .select-panel { min-width: 760px; }
@@ -1053,6 +1133,19 @@ kbd {
   padding: 1px 4px;
   font-family: var(--mono); font-size: 9px;
 }
+
+.scout-view {
+  position: absolute; top: 50%; left: 14px;
+  transform: translateY(-50%);
+  writing-mode: vertical-rl;
+  font-size: 9px; letter-spacing: 0.24em; text-transform: uppercase;
+  color: var(--hazard);
+  background: rgba(20,18,14,0.85);
+  border: 1px solid var(--hazard);
+  padding: 10px 4px;
+  pointer-events: none;
+}
+.scout-view b { color: var(--paper); }
 
 .fps {
   position: absolute; top: 10px; left: 12px;

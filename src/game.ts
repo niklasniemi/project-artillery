@@ -174,6 +174,11 @@ export class Game {
 
   // Camera + cinematics
   private cam: Camera = { x: WORLD_W / 2, y: WORLD_H / 2, zoom: 1 };
+  /** True once the player has zoomed or panned this turn. */
+  private camUser = false;
+  private camPanning = false;
+  private panLastX = 0;
+  private panLastY = 0;
   private cine: Cinematic | null = null;
   private queuedAdvance: { nextSeat: number; snapshot: Snapshot | null; gameOver: boolean } | null = null;
   /** Terrain as it looked when the shot was fired, so replays show intact ground. */
@@ -453,6 +458,46 @@ export class Game {
 
   private killCamDetonated = false;
 
+  // ---------- Free scouting camera ----------
+
+  /** Screen (world-canvas) point to world point under the current camera. */
+  private screenToWorld(sx: number, sy: number): { x: number; y: number } {
+    return {
+      x: (sx - WORLD_W / 2) / this.cam.zoom + this.cam.x,
+      y: (sy - WORLD_H / 2) / this.cam.zoom + this.cam.y,
+    };
+  }
+
+  /** Zooms about a screen point so the world under the cursor stays put. */
+  private zoomAt(sx: number, sy: number, factor: number): void {
+    if (this.phase === "cinematic") return;
+    const before = this.screenToWorld(sx, sy);
+    this.cam.zoom = clamp(this.cam.zoom * factor, 1, 4);
+    this.cam.x = before.x - (sx - WORLD_W / 2) / this.cam.zoom;
+    this.cam.y = before.y - (sy - WORLD_H / 2) / this.cam.zoom;
+    this.clampCamera();
+    this.camUser = this.cam.zoom > 1.02;
+    this.ui.setScoutView(this.camUser ? this.cam.zoom : 0);
+  }
+
+  private panCamera(dxScreen: number, dyScreen: number): void {
+    if (this.phase === "cinematic") return;
+    this.cam.x -= dxScreen / this.cam.zoom;
+    this.cam.y -= dyScreen / this.cam.zoom;
+    this.clampCamera();
+    this.camUser = true;
+    this.ui.setScoutView(this.cam.zoom);
+  }
+
+  /** Snaps back to the full battlefield view. */
+  resetCamera(): void {
+    this.cam.x = WORLD_W / 2;
+    this.cam.y = WORLD_H / 2;
+    this.cam.zoom = 1;
+    this.camUser = false;
+    this.ui.setScoutView(0);
+  }
+
   private clampCamera(): void {
     const z = Math.max(1, this.cam.zoom);
     this.cam.zoom = z;
@@ -558,6 +603,15 @@ export class Game {
     this.aiFired = false;
     this.aiMoveTarget = null;
     this.aiAimFrom = 0;
+    this.resetCamera();
+
+    // Per-turn fuel resupply, if the host enabled it.
+    const resupply = this.settings.fuelResupply ?? "off";
+    if (resupply === "full") {
+      t.fuel = t.maxFuel;
+    } else if (resupply === "partial") {
+      t.fuel = Math.min(t.maxFuel, t.fuel + t.maxFuel * 0.4);
+    }
 
     // Point the barrel at the nearest enemy so turns start naturally.
     const foe = this.tanks.filter((e) => e.alive && e.isEnemyOf(t))
@@ -1193,9 +1247,12 @@ export class Game {
         else if (this.phase === "input" && this.isMyTurn()) this.fire();
         else if (this.phase === "projectiles") this.requestSplit();
       }
+      if (e.key.toLowerCase() === "c") { this.resetCamera(); return; }
       if (this.phase === "input" && this.isMyTurn()) {
         const num = e.key === "0" ? 10 : parseInt(e.key, 10);
         if (num >= 1 && num <= 10) this.selectWeapon(num - 1);
+        if (e.key.toLowerCase() === "q") this.cycleWeapon(-1);
+        if (e.key.toLowerCase() === "e") this.cycleWeapon(1);
         if (e.key.toLowerCase() === "u") {
           if (this.ui.upgradePanelOpen) this.ui.closeUpgradePanel();
           else if (this.currentTank.upgradePoints > 0) this.ui.showUpgradePanel(this.currentTank);
@@ -1205,31 +1262,59 @@ export class Game {
     window.addEventListener("keyup", (e) => this.keys.delete(e.key.toLowerCase()));
     window.addEventListener("blur", () => this.keys.clear());
 
+    // Wheel scouts the terrain. Weapon cycling lives on Q/E instead, since
+    // zooming a map is what a wheel is expected to do.
     this.canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
-      if (this.phase !== "input" || !this.isMyTurn()) return;
-      this.cycleWeapon(e.deltaY > 0 ? 1 : -1);
+      const p = this.canvasPoint(e.clientX, e.clientY);
+      this.zoomAt(p.x, p.y, e.deltaY > 0 ? 1 / 1.16 : 1.16);
     }, { passive: false });
+
+    // Right-drag pans; suppress the context menu so it feels like a map.
+    this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
     this.canvas.addEventListener("pointerdown", (e) => {
       if (this.phase === "cinematic") { this.skipCinematic(); return; }
+      if (e.button === 2 || e.button === 1) {
+        this.camPanning = true;
+        this.panLastX = e.clientX;
+        this.panLastY = e.clientY;
+        return;
+      }
       if (this.phase !== "input" || !this.isMyTurn()) return;
       this.aiming = true;
       this.aimFromPointer(e);
     });
     window.addEventListener("pointermove", (e) => {
+      if (this.camPanning) {
+        const rect = this.canvas.getBoundingClientRect();
+        const scale = WORLD_W / rect.width;
+        this.panCamera((e.clientX - this.panLastX) * scale, (e.clientY - this.panLastY) * scale);
+        this.panLastX = e.clientX;
+        this.panLastY = e.clientY;
+        return;
+      }
       if (this.aiming) this.aimFromPointer(e);
     });
-    window.addEventListener("pointerup", () => (this.aiming = false));
+    window.addEventListener("pointerup", () => {
+      this.aiming = false;
+      this.camPanning = false;
+    });
+  }
+
+  /** Client coordinates to world-canvas coordinates. */
+  private canvasPoint(clientX: number, clientY: number): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * WORLD_W,
+      y: ((clientY - rect.top) / rect.height) * WORLD_H,
+    };
   }
 
   private aimFromPointer(e: PointerEvent): void {
-    const rect = this.canvas.getBoundingClientRect();
-    const sx = ((e.clientX - rect.left) / rect.width) * WORLD_W;
-    const sy = ((e.clientY - rect.top) / rect.height) * WORLD_H;
+    const p = this.canvasPoint(e.clientX, e.clientY);
     // Invert the camera transform so aiming is correct at any zoom.
-    const x = (sx - WORLD_W / 2) / this.cam.zoom + this.cam.x;
-    const y = (sy - WORLD_H / 2) / this.cam.zoom + this.cam.y;
+    const { x, y } = this.screenToWorld(p.x, p.y);
     const t = this.currentTank;
     t.angle = Math.atan2(y - (t.y - 10), x - t.x);
     t.power = clamp(dist(t.x, t.y - 10, x, y) * 0.28, 1, 100);
@@ -1426,11 +1511,20 @@ export class Game {
       }
     }
 
+    const lead = this.projectiles.find((p) => p.alive && !p.resting);
+
     // Track the leading shell for the kill cam (capped so long grenade rolls
     // can't grow the buffer without bound).
-    if (this.settings.cinematics !== false && this.shotPath.length < 900) {
-      const lead = this.projectiles.find((p) => p.alive && !p.resting);
-      if (lead) this.shotPath.push({ x: lead.x, y: lead.y });
+    if (this.settings.cinematics !== false && this.shotPath.length < 900 && lead) {
+      this.shotPath.push({ x: lead.x, y: lead.y });
+    }
+
+    // If the player scouted in, keep the shell in frame rather than letting it
+    // fly out of a zoomed view.
+    if (lead && this.cam.zoom > 1.05) {
+      this.cam.x = lerp(this.cam.x, lead.x, 0.12);
+      this.cam.y = lerp(this.cam.y, lead.y, 0.12);
+      this.clampCamera();
     }
 
     this.projectiles = this.projectiles.filter((p) => p.alive);

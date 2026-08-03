@@ -34,7 +34,11 @@ Open http://localhost:5173 — Local Play works immediately.
 cd server && npm install && npm run dev
 ```
 
-Then in the game menu: **ONLINE → CREATE ROOM**, share the room code, friends **JOIN ROOM**. The client connects to `ws://localhost:2567` by default; set `VITE_SERVER_URL` to point elsewhere.
+Then open **§2 Online Play**, enter your name and pick one of two paths:
+**Host a game** (choose the rules, get a room code to share) or **Join a game**
+(paste the code a friend sent you). The connection settings row is collapsed
+unless no server is configured. The client connects to `ws://localhost:2567` by
+default; set `VITE_SERVER_URL` to point elsewhere.
 
 ### Deploy the server to Render
 
@@ -76,7 +80,10 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | W / S or mouse drag distance | Power |
 | Space / click | Fire (hold nothing — instant) |
 | Space mid-air | Trigger Splitter split |
-| 1–0 / mouse wheel / click | Select weapon (wheel cycles all 20, skipping bans) |
+| 1–0, Q / E, or click | Select weapon (Q/E cycles all 20, skipping bans) |
+| Mouse wheel | Zoom the scouting camera (1×–4×) |
+| Right-drag | Look around the battlefield |
+| C | Recentre the camera |
 | M | Mute audio |
 | F3 | Frame-rate / quality readout |
 | Space / Esc / click | Skip a cutscene or kill cam |

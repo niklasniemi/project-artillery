@@ -45,6 +45,7 @@ export interface MatchSettings {
   fallDamage: boolean;
   friendlyFire: boolean;
   startLevel: number;
+  fuelResupply: "off" | "partial" | "full";
 }
 
 export interface LobbyPlayer {
@@ -276,6 +277,7 @@ export class UI {
       fallDamage: bankVal("falldmg") === "on",
       friendlyFire: bankVal("ff") === "on",
       startLevel: parseInt(bankVal("startlvl"), 10),
+      fuelResupply: bankVal("resupply") as MatchSettings["fuelResupply"],
     };
   }
 
@@ -344,6 +346,11 @@ export class UI {
         { value: "1", label: "1" },
         { value: "2", label: "2" },
       ], "0")}
+      ${bank("resupply", "Fuel Resupply", [
+        { value: "off", label: "None" },
+        { value: "partial", label: "+40%/turn" },
+        { value: "full", label: "Full/turn" },
+      ], "off")}
       ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
       ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}
       <div class="section-break"><span>Armory · click to ban</span></div>
@@ -371,7 +378,7 @@ export class UI {
         <main class="doc-body">
           <nav class="folder-tabs">
             <button class="ftab active" data-tab="local">§1 · Local Range</button>
-            <button class="ftab" data-tab="online">§2 · Network Op</button>
+            <button class="ftab" data-tab="online">§2 · Online Play</button>
           </nav>
           <div class="sheet" id="local">
             <div class="sheet-head">
@@ -391,29 +398,65 @@ export class UI {
           </div>
           <div class="sheet" id="online" style="display:none">
             <div class="sheet-head">
-              <h2>Network Operation</h2>
-              <span class="hint">Up to 8 guns</span>
+              <h2>Online Play</h2>
+              <span class="hint">Play with friends · up to 8</span>
             </div>
+
             <div class="field">
-              <span class="label">Callsign</span>
+              <span class="label">Your name</span>
               <input type="text" id="o-name" maxlength="14" value="${savedName}" />
             </div>
-            <div class="field">
-              <span class="label">Relay Server</span>
-              <input type="text" id="o-server" placeholder="your-service.onrender.com" value="${savedServer}" />
+
+            <!-- Step 1: one clear choice, nothing else on screen yet. -->
+            <div class="choice" id="o-choice">
+              <button type="button" class="choice-card" data-flow="host">
+                <span class="ch-num">1</span>
+                <span class="ch-title">Host a game</span>
+                <span class="ch-desc">Set the rules and get a room code to share with your friends.</span>
+                <span class="ch-go">Choose ▸</span>
+              </button>
+              <button type="button" class="choice-card" data-flow="join">
+                <span class="ch-num">2</span>
+                <span class="ch-title">Join a game</span>
+                <span class="ch-desc">Already have a room code from a friend? Enter it here.</span>
+                <span class="ch-go">Choose ▸</span>
+              </button>
             </div>
-            <div class="note" id="o-serverhint"></div>
-            <div class="field">
-              <span class="label">Room Code</span>
-              <input type="text" id="o-code" maxlength="14" placeholder="paste code to join" />
+
+            <!-- Step 2a: join -->
+            <div class="flow" id="o-flow-join" style="display:none">
+              <button type="button" class="backlink" data-back>◂ Back</button>
+              <h3 class="flow-title">Join a game</h3>
+              <p class="flow-help">Ask the host for their room code — it appears at the
+                top of their lobby screen. Type or paste it below.</p>
+              <div class="field">
+                <span class="label">Room code</span>
+                <input type="text" id="o-code" maxlength="14" placeholder="e.g. A4VRp30s2" />
+              </div>
+              <button class="btn fire-key" id="o-join">Join game ▸</button>
             </div>
-            <div class="row-buttons" style="margin-top:14px">
-              <button class="btn" id="o-join">Join Room ▸</button>
+
+            <!-- Step 2b: host -->
+            <div class="flow" id="o-flow-host" style="display:none">
+              <button type="button" class="backlink" data-back>◂ Back</button>
+              <h3 class="flow-title">Host a game</h3>
+              <p class="flow-help">Pick your rules, then share the room code with your
+                friends. You can still change your tank in the lobby.</p>
+              ${this.controlSurface("online")}
+              <button class="btn fire-key" id="o-create">Create room ▸</button>
             </div>
-            <div class="section-break"><span>or open a new room</span></div>
-            ${this.controlSurface("online")}
-            <button class="btn fire-key" id="o-create">Open Room ▸</button>
+
             <div class="net-status" id="o-status"></div>
+
+            <!-- Connection details, hidden unless something is wrong or asked for. -->
+            <details class="conn" id="o-conn">
+              <summary>Connection settings</summary>
+              <div class="field" style="margin-top:10px">
+                <span class="label">Server</span>
+                <input type="text" id="o-server" placeholder="your-service.onrender.com" value="${savedServer}" />
+              </div>
+              <div class="note" id="o-serverhint"></div>
+            </details>
           </div>
         </main>
       </div>`;
@@ -464,13 +507,41 @@ export class UI {
       runPick(0);
     };
 
+    // Step 1 → step 2 navigation.
+    const choice = this.menu.querySelector<HTMLElement>("#o-choice")!;
+    const flowHost = this.menu.querySelector<HTMLElement>("#o-flow-host")!;
+    const flowJoin = this.menu.querySelector<HTMLElement>("#o-flow-join")!;
+    const showFlow = (which: "none" | "host" | "join"): void => {
+      choice.style.display = which === "none" ? "" : "none";
+      flowHost.style.display = which === "host" ? "" : "none";
+      flowJoin.style.display = which === "join" ? "" : "none";
+      this.netStatus("");
+      if (which === "join") {
+        this.menu.querySelector<HTMLInputElement>("#o-code")?.focus();
+      }
+    };
+    choice.querySelectorAll<HTMLButtonElement>(".choice-card").forEach((btn) => {
+      btn.onclick = () => {
+        sfx.unlock(); sfx.ui();
+        showFlow(btn.dataset.flow as "host" | "join");
+      };
+    });
+    this.menu.querySelectorAll<HTMLButtonElement>("[data-back]").forEach((b) => {
+      b.onclick = () => { sfx.ui(); showFlow("none"); };
+    });
+
     const serverInput = this.menu.querySelector<HTMLInputElement>("#o-server")!;
     const serverHint = this.menu.querySelector<HTMLElement>("#o-serverhint")!;
+    const conn = this.menu.querySelector<HTMLDetailsElement>("#o-conn")!;
     const refreshHint = (): void => {
       const url = resolveServerUrl();
-      serverHint.textContent = url
-        ? `Relay: ${url}`
-        : "No relay set. Paste your Render service host above, or build with VITE_SERVER_URL.";
+      if (url) {
+        serverHint.textContent = `Connecting to ${url}`;
+      } else {
+        // Nothing configured — surface it instead of letting a join hang.
+        serverHint.textContent = "No server set. Enter your server address above to play online.";
+        conn.open = true;
+      }
     };
     serverInput.onchange = () => {
       const normalized = setStoredServerUrl(serverInput.value);
@@ -487,15 +558,20 @@ export class UI {
     };
     this.menu.querySelector<HTMLButtonElement>("#o-create")!.onclick = () => {
       sfx.unlock(); sfx.ui();
-      this.netStatus("Opening room…");
+      this.netStatus("Creating your room…");
       this.cb.onCreateRoom(nameOf(), this.readSettings(onlinePane, []));
     };
-    this.menu.querySelector<HTMLButtonElement>("#o-join")!.onclick = () => {
+    const doJoin = (): void => {
       sfx.unlock(); sfx.ui();
       const code = this.menu.querySelector<HTMLInputElement>("#o-code")!.value.trim();
-      if (!code) { this.netStatus("Enter a room code first."); return; }
+      if (!code) { this.netStatus("Enter the room code your friend gave you."); return; }
       this.netStatus("Joining…");
       this.cb.onJoinRoom(nameOf(), code);
+    };
+    this.menu.querySelector<HTMLButtonElement>("#o-join")!.onclick = doJoin;
+    // Enter submits, which is what anyone pasting a code expects.
+    this.menu.querySelector<HTMLInputElement>("#o-code")!.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doJoin(); }
     };
   }
 
@@ -730,9 +806,11 @@ export class UI {
         <div class="weapon-bar" id="w-bar"></div>
         <button class="fire-btn" id="fire">Fire</button>
       </div>
+      <div class="scout-view" id="t-scout" style="display:none"></div>
       <div class="controls-hint">
         <kbd>←→</kbd> drive · <kbd>↑↓</kbd> elev · <kbd>W/S</kbd> charge · <kbd>Space</kbd> fire<br/>
-        <kbd>1–0</kbd>/wheel ordnance · <kbd>U</kbd> upgrade · <kbd>M</kbd> mute · <kbd>F3</kbd> perf
+        <kbd>1–0</kbd> or <kbd>Q/E</kbd> ordnance · <kbd>U</kbd> upgrade · <kbd>M</kbd> mute<br/>
+        <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> look around · <kbd>C</kbd> recentre
       </div>`;
 
     this.turnName = this.hud.querySelector("#t-name")!;
@@ -837,6 +915,15 @@ export class UI {
     if (!this.fpsEl || this.fpsEl.style.display === "none") return;
     this.fpsEl.textContent = `${fps} FPS${degraded ? " · ECO" : ""}`;
     this.fpsEl.classList.toggle("warn", fps < 50);
+  }
+
+  /** Shows the current scout zoom, or hides the badge when passed 0. */
+  setScoutView(zoom: number): void {
+    const el = this.hud.querySelector<HTMLElement>("#t-scout");
+    if (!el) return;
+    if (zoom <= 1.02) { el.style.display = "none"; return; }
+    el.style.display = "";
+    el.innerHTML = `SCOUT VIEW ×${zoom.toFixed(1)} · <b>C</b> to recentre`;
   }
 
   /** F3 toggles the perf readout — off by default. */
