@@ -4,6 +4,7 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 
 ## Features
 
+- **Six themed theatres** — Nightfall, Dune Sea, Frostbite, Ashlands, Verdant and Orbital, each with its own sky, rock palette, hazard colour and weather, picked from rendered map cards
 - **Six tank chassis** with real trade-offs — Vanguard, Scout, Bulwark, Howitzer, Sapper, Reaver; pick chassis and livery before every match
 - **Cinematics** — a roll-call cutscene introduces every tank at the open, and a kill cam replays the shot that destroyed someone
 - **Online multiplayer** — Colyseus lockstep server, room codes, up to 8 players, ready-up lobby
@@ -15,7 +16,7 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 - **Physics-driven combat** — gravity, per-turn dynamic wind, bounces, homing, hitscan beams
 - **In-match XP** — deal damage, level up, and upgrade your arsenal mid-game; resets every match
 - **Local play** — hotseat multiplayer (up to 4 tanks) and AI opponents with ballistic shot planning
-- **Granular lobby settings** — mode, HP, fuel, wind variability, turn timer, terrain type (Hilly / Flat / Cavern / Floating Islands), crate drops, round count
+- **Granular lobby settings** — mode, map, terrain shape, HP, fuel, wind, turn timer, crate drops, round count, gravity, shell pace, aim-guide detail, fall damage, friendly fire, starting level, weapon bans and cinematics
 - **Neon sci-fi visuals** — particles, screen shake, projectile trails, synthesized audio (no assets required)
 
 ## Run it
@@ -120,6 +121,20 @@ alternated, three terrain types) lands every chassis between **45% and 57.5%**
 win rate — inside one standard error of even at that sample size. The AI
 repositions with its fuel before firing, which is what gives the mobile chassis
 their value; without that, mobility stats are worth nothing in a duel.
+
+## Rendering notes
+
+Tank art is authored once and cached: hull and barrel rasterize to sprites keyed
+by `(chassis, colour, size)`, with the barrel in its own sprite because it
+rotates. A steady-state chassis draw costs **~3.7µs** (about 0.03ms for eight
+tanks) against **~78µs** to build a sprite, which happens at most a few dozen
+times per session. That is what makes the road wheels, track links, panel lines,
+mantlets and per-type greebles essentially free. Tanks render at 1.3× their
+collision radius so the detail is legible — cosmetic only, hitboxes are unchanged.
+
+Map themes drive one shared `paintSky` routine, used for both the world
+background and the selector thumbnails, so a map card always looks like the map
+it launches.
 
 ## Performance notes
 

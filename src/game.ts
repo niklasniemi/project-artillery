@@ -1,12 +1,14 @@
 import { Terrain } from "./terrain";
-import { Tank, Projectile, Crate, CrateKind, TANK_RADIUS, GRAVITY } from "./entities";
+import { Tank, Projectile, Crate, CrateKind, TANK_RADIUS } from "./entities";
 import { Loadout, TankPalette, drawChassis } from "./tanks";
 import { Particles, ScreenShake } from "./particles";
 import { WEAPONS, levelForXp } from "./weapons";
 import { UI, MatchSettings } from "./ui";
-import { planShot, planMove, AiPlan, POWER_TO_VELOCITY } from "./ai";
+import { planShot, planMove, AiPlan } from "./ai";
+import { physics, configurePhysics } from "./physics";
 import { sfx, FireVoice } from "./audio";
-import { clamp, dist, lerp, easeInOut, seededRandom, rngRange, rngPick, TAU } from "./util";
+import { clamp, dist, lerp, easeInOut, randRange, seededRandom, rngRange, rngPick, TAU } from "./util";
+import { MapTheme, MAP_THEMES, themeById, paintSky } from "./themes";
 
 export const WORLD_W = 1600;
 export const WORLD_H = 900;
@@ -89,6 +91,12 @@ interface ShotContext {
 
 interface Camera { x: number; y: number; zoom: number }
 
+interface WeatherParticle {
+  x: number; y: number;
+  vx: number; vy: number;
+  size: number; phase: number;
+}
+
 /** A tank's on-screen state frozen at fire time, for kill-cam playback. */
 interface GhostTank {
   x: number; y: number;
@@ -140,6 +148,8 @@ export class Game {
   private bg: HTMLCanvasElement;
   private vignette: HTMLCanvasElement | null = null;
   private voidGradient: CanvasGradient | null = null;
+  private theme: MapTheme = MAP_THEMES[0];
+  private weather: WeatherParticle[] = [];
   private rng: () => number = Math.random;
 
   private phase: Phase = "idle";
@@ -222,9 +232,14 @@ export class Game {
   start(settings: MatchSettings, opts?: { seed?: number; online?: OnlineContext }): void {
     this.settings = settings;
     this.online = opts?.online ?? null;
+    configurePhysics(settings.gravity ?? "normal", settings.pace ?? "normal");
+    this.theme = themeById(settings.mapTheme ?? "nightfall");
     const seed = opts?.seed ?? Math.floor(Math.random() * 1e9);
     this.rng = seededRandom(seed);
-    this.terrain.generate(settings.terrainType, Math.floor(this.rng() * 1e9));
+    this.terrain.generate(settings.terrainType, Math.floor(this.rng() * 1e9), this.theme.terrain);
+    this.bg = this.buildBackground();
+    this.voidGradient = null;
+    this.initWeather();
     this.projectiles = [];
     this.pendingBlasts = [];
     this.pendingSpawns = [];
@@ -294,7 +309,15 @@ export class Game {
     }
 
     const firstAllowed = this.firstAllowedWeapon();
-    for (const t of this.tanks) t.selectedWeapon = firstAllowed;
+    const startLevel = Math.max(0, settings.startLevel ?? 0);
+    for (const t of this.tanks) {
+      t.selectedWeapon = firstAllowed;
+      if (startLevel > 0) {
+        t.level = startLevel;
+        t.upgradePoints = startLevel;
+        if (t.isAI) this.spendAiUpgrades(t);
+      }
+    }
 
     this.ui.buildHud([...this.banned]);
     this.currentIndex = -1;
@@ -630,7 +653,7 @@ export class Game {
       const count = def.behavior === "twins" ? (stats.count ?? 2) : 1;
       for (let i = 0; i < count; i++) {
         const spread = count > 1 ? (i - (count - 1) / 2) * 0.055 : 0;
-        const v = t.power * POWER_TO_VELOCITY * def.speedMul * t.attrs.velocity;
+        const v = t.power * physics.powerToVelocity * def.speedMul * t.attrs.velocity;
         this.projectiles.push(new Projectile({
           x: tip.x, y: tip.y,
           vx: Math.cos(t.angle + spread) * v,
@@ -756,6 +779,8 @@ export class Game {
     let enemyDamage = 0;
     for (const tank of this.tanks) {
       if (!tank.alive) continue;
+      // Friendly fire off spares teammates but never the shooter themselves.
+      if (this.settings.friendlyFire === false && tank !== owner && !tank.isEnemyOf(owner)) continue;
       let dmg = 0;
       if (tank === opts.direct) {
         dmg = damage;
@@ -986,18 +1011,22 @@ export class Game {
       if (!tank.isAI) {
         this.ui.banner("LEVEL UP!", "#b6ff4d");
       } else {
-        // AI spends immediately on a weapon it actually uses.
-        while (tank.upgradePoints > 0) {
-          const candidates = ["shell", "mortar", "sniper", "cluster"]
-            .map((id) => WEAPONS.findIndex((w) => w.id === id))
-            .filter((i) => i >= 0 && !this.banned.has(i) && tank.weaponTiers[i] < 2);
-          if (candidates.length === 0) break;
-          tank.weaponTiers[rngPick(this.rng, candidates)]++;
-          tank.upgradePoints--;
-        }
+        this.spendAiUpgrades(tank);
       }
     }
     if (tank === this.currentTank || !tank.isAI) this.ui.updateXp(tank);
+  }
+
+  /** Bots bank nothing — points go straight into guns they actually fire. */
+  private spendAiUpgrades(tank: Tank): void {
+    while (tank.upgradePoints > 0) {
+      const candidates = ["shell", "mortar", "sniper", "cluster"]
+        .map((id) => WEAPONS.findIndex((w) => w.id === id))
+        .filter((i) => i >= 0 && !this.banned.has(i) && tank.weaponTiers[i] < 2);
+      if (candidates.length === 0) break;
+      tank.weaponTiers[rngPick(this.rng, candidates)]++;
+      tank.upgradePoints--;
+    }
   }
 
   upgradeWeapon(weaponIndex: number, fromNet = false, seat?: number): void {
@@ -1264,6 +1293,7 @@ export class Game {
     if (!catchUp) this.handleHeldKeys(dt);
     this.particles.update(dt);
     this.shake.update(dt);
+    this.updateWeather(dt);
     this.flushNet(dt);
     for (const b of this.beams) b.life -= dt;
     this.beams = this.beams.filter((b) => b.life > 0);
@@ -1272,7 +1302,10 @@ export class Game {
     // Tanks always settle (terrain may vanish beneath anyone at any time).
     for (const tank of this.tanks) {
       if (!tank.alive) continue;
-      const fallDmg = tank.settle(this.terrain, dt);
+      // settle() must always run — it is what moves the tank. Only the damage
+      // it reports is optional.
+      const landed = tank.settle(this.terrain, dt);
+      const fallDmg = this.settings.fallDamage === false ? 0 : landed;
       if (fallDmg > 0) {
         this.applyDamage(tank, fallDmg, tank);
         this.particles.sparks(tank.x, tank.y, 6);
@@ -1426,7 +1459,7 @@ export class Game {
       p.digElapsed += h;
       p.x += p.vx * h * 0.4;
       p.y += p.vy * h * 0.4;
-      p.vy += GRAVITY * p.def.gravityMul * h * 0.4;
+      p.vy += physics.gravity * p.def.gravityMul * h * 0.4;
       this.terrain.carve(p.x, p.y, (p.stats.radius ?? 30) * 0.45);
       if (Math.random() < 0.5) this.particles.spawn(p.x, p.y, rngRange(Math.random, -60, 60), rngRange(Math.random, -120, -30), 0.5, 3, "#b68d5c", 300);
       const hitTank = this.findTankHit(p);
@@ -1483,7 +1516,7 @@ export class Game {
     }
 
     p.vx += this.wind * p.def.windMul * p.owner.attrs.wind * h;
-    p.vy += GRAVITY * p.def.gravityMul * h;
+    p.vy += physics.gravity * p.def.gravityMul * h;
     p.x += p.vx * h;
     p.y += p.vy * h;
 
@@ -1641,65 +1674,73 @@ export class Game {
 
   // ---------- Rendering ----------
 
+  /** Ambient weather drifting across the field, seeded per theme. */
+  private initWeather(): void {
+    this.weather = [];
+    const kind = this.theme.weather;
+    if (kind === "none") return;
+    const count = kind === "snow" ? 150 : kind === "ash" ? 120 : kind === "sand" ? 180 : 90;
+    for (let i = 0; i < count; i++) {
+      this.weather.push({
+        x: Math.random() * WORLD_W,
+        y: Math.random() * WORLD_H,
+        vx: 0, vy: 0,
+        size: 0, phase: Math.random() * TAU,
+      });
+    }
+    for (const p of this.weather) this.seedWeatherParticle(p, true);
+  }
+
+  private seedWeatherParticle(p: WeatherParticle, initial = false): void {
+    const kind = this.theme.weather;
+    p.x = Math.random() * WORLD_W;
+    p.y = initial ? Math.random() * WORLD_H : (kind === "ash" ? WORLD_H + 10 : -10);
+    p.phase = Math.random() * TAU;
+    if (kind === "snow") {
+      p.vx = randRange(-14, 14); p.vy = randRange(22, 46); p.size = randRange(1.2, 2.8);
+    } else if (kind === "ash") {
+      p.vx = randRange(-10, 10); p.vy = randRange(-34, -12); p.size = randRange(1, 2.4);
+    } else if (kind === "sand") {
+      p.vx = randRange(120, 260); p.vy = randRange(-12, 16); p.size = randRange(1, 2.2);
+      p.x = initial ? Math.random() * WORLD_W : -10;
+    } else { // spore
+      p.vx = randRange(-16, 16); p.vy = randRange(-18, -4); p.size = randRange(1.4, 3);
+    }
+  }
+
+  private updateWeather(dt: number): void {
+    if (this.weather.length === 0) return;
+    for (const p of this.weather) {
+      p.phase += dt * 1.6;
+      p.x += (p.vx + Math.sin(p.phase) * 12) * dt;
+      p.y += p.vy * dt;
+      if (p.y < -30 || p.y > WORLD_H + 30 || p.x < -30 || p.x > WORLD_W + 30) {
+        this.seedWeatherParticle(p);
+      }
+    }
+  }
+
+  private drawWeather(ctx: CanvasRenderingContext2D): void {
+    if (this.weather.length === 0) return;
+    ctx.save();
+    ctx.fillStyle = this.theme.weatherColor;
+    ctx.globalAlpha = this.theme.weather === "sand" ? 0.28 : 0.5;
+    for (const p of this.weather) {
+      if (this.theme.weather === "sand") {
+        ctx.fillRect(p.x, p.y, p.size * 5, p.size * 0.6);
+      } else {
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+      }
+    }
+    ctx.restore();
+  }
+
   private buildBackground(): HTMLCanvasElement {
     const bg = document.createElement("canvas");
     bg.width = WORLD_W;
     bg.height = WORLD_H;
     const c = bg.getContext("2d")!;
-    // Night sky over a burning horizon — warm end ties into the UI's hazard orange.
-    const grad = c.createLinearGradient(0, 0, 0, WORLD_H);
-    grad.addColorStop(0, "#05060a");
-    grad.addColorStop(0.42, "#0b1020");
-    grad.addColorStop(0.72, "#1d1a2a");
-    grad.addColorStop(0.9, "#3d2418");
-    grad.addColorStop(1, "#5c2f16");
-    c.fillStyle = grad;
-    c.fillRect(0, 0, WORLD_W, WORLD_H);
-
-    for (let i = 0; i < 240; i++) {
-      const x = Math.random() * WORLD_W;
-      const y = Math.random() * WORLD_H * 0.62;
-      const s = Math.random() * 1.7 + 0.4;
-      c.globalAlpha = Math.random() * 0.65 + 0.12;
-      c.fillStyle = Math.random() < 0.88 ? "#dce6f5" : "#ffd9b8";
-      c.fillRect(x, y, s, s);
-    }
-    c.globalAlpha = 1;
-
-    // Haze bloom just above the horizon.
-    const haze = c.createRadialGradient(
-      WORLD_W * 0.5, WORLD_H * 1.02, 40,
-      WORLD_W * 0.5, WORLD_H * 1.02, WORLD_W * 0.62,
-    );
-    haze.addColorStop(0, "rgba(255,120,45,0.34)");
-    haze.addColorStop(1, "rgba(255,120,45,0)");
-    c.fillStyle = haze;
-    c.fillRect(0, WORLD_H * 0.55, WORLD_W, WORLD_H * 0.45);
-
-    // Distant moon, cold against the warm horizon.
-    c.beginPath();
-    c.arc(WORLD_W * 0.83, WORLD_H * 0.17, 54, 0, TAU);
-    c.fillStyle = "#171d2e";
-    c.fill();
-    c.strokeStyle = "rgba(236,228,210,0.32)";
-    c.lineWidth = 1.5;
-    c.stroke();
-
-    // Ridge silhouettes for depth.
-    for (let layer = 0; layer < 2; layer++) {
-      c.beginPath();
-      const baseY = WORLD_H * (0.66 + layer * 0.08);
-      c.moveTo(0, WORLD_H);
-      c.lineTo(0, baseY);
-      for (let x = 0; x <= WORLD_W; x += 40) {
-        const h = Math.sin(x * 0.0031 + layer * 2.2) * 46 + Math.sin(x * 0.0087 + layer) * 22;
-        c.lineTo(x, baseY - h);
-      }
-      c.lineTo(WORLD_W, WORLD_H);
-      c.closePath();
-      c.fillStyle = layer === 0 ? "rgba(9,10,18,0.55)" : "rgba(5,6,12,0.72)";
-      c.fill();
-    }
+    paintSky(c, this.theme, WORLD_W, WORLD_H, 7);
     return bg;
   }
 
@@ -1731,8 +1772,8 @@ export class Game {
     const glow = 0.5 + 0.3 * Math.sin(performance.now() / 300);
     if (!this.voidGradient) {
       const vg = ctx.createLinearGradient(0, WORLD_H - 46, 0, WORLD_H);
-      vg.addColorStop(0, "rgba(255, 90, 31, 0)");
-      vg.addColorStop(1, "rgba(255, 128, 40, 1)");
+      vg.addColorStop(0, `rgba(${this.theme.voidGlow[0]}, 0)`);
+      vg.addColorStop(1, `rgba(${this.theme.voidGlow[0]}, 1)`);
       this.voidGradient = vg;
     }
     ctx.save();
@@ -1741,9 +1782,11 @@ export class Game {
     ctx.fillStyle = this.voidGradient;
     ctx.fillRect(0, WORLD_H - 46, WORLD_W, 46);
     ctx.globalAlpha = 0.55 + glow * 0.35;
-    ctx.fillStyle = "rgb(255, 226, 178)";
+    ctx.fillStyle = `rgb(${this.theme.voidGlow[1]})`;
     ctx.fillRect(0, WORLD_H - 3, WORLD_W, 3);
     ctx.restore();
+
+    this.drawWeather(ctx);
 
     for (const crate of this.crates) crate.draw(ctx);
 
@@ -1819,7 +1862,7 @@ export class Game {
 
     for (const g of kc.ghosts) {
       if (!g.alive) continue;
-      drawChassis(ctx, g.typeId, g.palette, g.x, g.y, g.facing, g.angle, TANK_RADIUS);
+      drawChassis(ctx, g.typeId, g.palette, g.x, g.y, g.facing, g.angle, TANK_RADIUS * 1.3);
       ctx.font = "700 11px ui-monospace, Menlo, monospace";
       ctx.textAlign = "center";
       ctx.fillStyle = g.palette.glow;
@@ -1880,28 +1923,91 @@ export class Game {
     if (this.vignette) ctx.drawImage(this.vignette, 0, 0);
   }
 
+  /**
+   * Trajectory preview: a tapering dotted arc that fades with distance, an
+   * impact reticle where it meets the ground, and a charge gauge at the muzzle.
+   */
   private drawAimGuide(ctx: CanvasRenderingContext2D, t: Tank): void {
+    const mode = this.settings.aimGuide ?? "full";
+    if (mode === "off") return;
+
     const def = t.weaponDef;
-    const v = t.power * POWER_TO_VELOCITY * def.speedMul * t.attrs.velocity;
-    let x = t.barrelTip.x, y = t.barrelTip.y;
+    const v = t.power * physics.powerToVelocity * def.speedMul * t.attrs.velocity;
+    const tip = t.barrelTip;
+    let x = tip.x, y = tip.y;
     let vx = Math.cos(t.angle) * v;
     let vy = Math.sin(t.angle) * v;
     const dt = 1 / 60;
+    const steps = mode === "short" ? 34 : 150;
+
     ctx.save();
-    ctx.fillStyle = t.palette.glow;
-    for (let i = 0; i < 38; i++) {
+
+    // Sample the arc, remembering where (if anywhere) it lands.
+    let hit: { x: number; y: number } | null = null;
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i < steps; i++) {
       vx += this.wind * def.windMul * t.attrs.wind * dt;
-      vy += GRAVITY * def.gravityMul * dt;
+      vy += physics.gravity * def.gravityMul * dt;
       x += vx * dt;
       y += vy * dt;
-      if (this.terrain.solid(x, y)) break;
-      if (i % 3 === 0) {
-        ctx.globalAlpha = 0.75 * (1 - i / 38);
-        ctx.beginPath();
-        ctx.arc(x, y, 2.2, 0, TAU);
-        ctx.fill();
-      }
+      if (x < -80 || x > WORLD_W + 80) break;
+      if (y > WORLD_H) { hit = { x, y: WORLD_H }; break; }
+      pts.push({ x, y });
+      if (this.terrain.solid(x, y)) { hit = { x, y }; break; }
     }
+
+    // Dots thin and fade along the flight path.
+    ctx.fillStyle = t.palette.glow;
+    for (let i = 0; i < pts.length; i += 3) {
+      const f = i / Math.max(1, pts.length - 1);
+      ctx.globalAlpha = 0.8 * (1 - f * 0.75);
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, 2.6 - f * 1.5, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Impact reticle — only meaningful on the full guide.
+    if (hit && mode === "full") {
+      const pulse = 1 + Math.sin(performance.now() / 180) * 0.12;
+      const rr = 11 * pulse;
+      ctx.strokeStyle = t.palette.glow;
+      ctx.lineWidth = 1.6;
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.arc(hit.x, hit.y, rr, 0, TAU);
+      ctx.stroke();
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.moveTo(hit.x - rr - 6, hit.y); ctx.lineTo(hit.x - rr + 2, hit.y);
+      ctx.moveTo(hit.x + rr - 2, hit.y); ctx.lineTo(hit.x + rr + 6, hit.y);
+      ctx.moveTo(hit.x, hit.y - rr - 6); ctx.lineTo(hit.x, hit.y - rr + 2);
+      ctx.moveTo(hit.x, hit.y + rr - 2); ctx.lineTo(hit.x, hit.y + rr + 6);
+      ctx.stroke();
+
+      // Blast footprint of the selected round.
+      ctx.globalAlpha = 0.22;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(hit.x, hit.y, t.weaponStats.radius * t.attrs.blast, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
+    // Charge gauge: an arc at the muzzle that fills with power.
+    const gaugeR = 30;
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = 0.28;
+    ctx.strokeStyle = t.palette.glow;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y - 10, gaugeR, t.angle - 0.5, t.angle + 0.5);
+    ctx.stroke();
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y - 10, gaugeR, t.angle - 0.5, t.angle - 0.5 + (t.power / 100) * 1.0);
+    ctx.stroke();
+
     ctx.restore();
   }
 }

@@ -1,6 +1,11 @@
 import { clamp, seededRandom, TAU } from "./util";
+import { TerrainPaint } from "./themes";
 
 export type TerrainType = "hilly" | "flat" | "cavern" | "islands";
+
+const DEFAULT_PAINT: TerrainPaint = {
+  lip: [255, 208, 150], base: [44, 40, 62], depth: [20, 20, 28], noise: 14,
+};
 
 /**
  * Pixel-mask destructible terrain. `mask` is the physics source of truth
@@ -13,6 +18,7 @@ export class Terrain {
   readonly mask: Uint8Array;
   readonly canvas: OffscreenCanvas | HTMLCanvasElement;
   private readonly ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+  private paint: TerrainPaint = DEFAULT_PAINT;
 
   constructor(width: number, height: number) {
     this.width = width;
@@ -39,7 +45,12 @@ export class Terrain {
     return -1;
   }
 
-  generate(type: TerrainType, seed = Math.floor(Math.random() * 1e9)): void {
+  generate(
+    type: TerrainType,
+    seed = Math.floor(Math.random() * 1e9),
+    paint: TerrainPaint = DEFAULT_PAINT,
+  ): void {
+    this.paint = paint;
     const rand = seededRandom(seed);
     this.mask.fill(0);
 
@@ -137,6 +148,8 @@ export class Terrain {
     const img = this.ctx.createImageData(this.width, this.height);
     const d = img.data;
     const rand = seededRandom(1337);
+    // Named depthRamp to avoid shadowing the per-column depth counter below.
+    const { lip, base, depth: depthRamp, noise: noiseAmt } = this.paint;
     // Precompute per-column depth-from-surface for shading.
     for (let x = 0; x < this.width; x++) {
       let depth = -1;
@@ -149,15 +162,15 @@ export class Terrain {
           continue;
         }
         const i = mi * 4;
-        const noise = rand() * 14;
+        const n = rand() * noiseAmt;
         if (depth < 3) {
-          // Sunlit surface lip — warm, to sit with the horizon glow.
-          d[i] = 255; d[i + 1] = 208; d[i + 2] = 150; d[i + 3] = 255;
+          // Sunlit surface lip, in the map theme's own light.
+          d[i] = lip[0]; d[i + 1] = lip[1]; d[i + 2] = lip[2]; d[i + 3] = 255;
         } else {
           const t = Math.min(1, depth / 260);
-          d[i] = 44 - t * 20 + noise;
-          d[i + 1] = 40 - t * 20 + noise * 0.7;
-          d[i + 2] = 62 - t * 28 + noise * 0.9;
+          d[i] = base[0] - t * depthRamp[0] + n;
+          d[i + 1] = base[1] - t * depthRamp[1] + n * 0.7;
+          d[i + 2] = base[2] - t * depthRamp[2] + n * 0.9;
           d[i + 3] = 255;
         }
       }

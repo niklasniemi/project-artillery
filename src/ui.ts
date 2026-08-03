@@ -5,6 +5,9 @@ import { formatDeg } from "./util";
 import { sfx } from "./audio";
 import { storedServerUrl, setStoredServerUrl, resolveServerUrl } from "./net";
 import { TANK_TYPES, TANK_COLORS, Loadout, typeById, paletteFor, drawChassis } from "./tanks";
+import { MAP_THEMES, paintThumbnail } from "./themes";
+import { GravityMode, PaceMode } from "./physics";
+import { weaponIcon } from "./icons";
 
 export type GameMode = "deathmatch" | "points" | "juggernaut" | "assassination";
 
@@ -35,6 +38,13 @@ export interface MatchSettings {
   crates: boolean;
   bannedWeapons: number[];
   cinematics: boolean;
+  mapTheme: string;
+  gravity: GravityMode;
+  pace: PaceMode;
+  aimGuide: "off" | "short" | "full";
+  fallDamage: boolean;
+  friendlyFire: boolean;
+  startLevel: number;
 }
 
 export interface LobbyPlayer {
@@ -115,8 +125,18 @@ function opsGrid(selected: GameMode): string {
 
 function armoryGrid(): string {
   return `<div class="armory" data-armory>` + WEAPONS.map((w, i) =>
-    `<button type="button" class="arm" data-idx="${i}" title="${w.name} — click to ban">${w.icon}</button>`,
+    `<button type="button" class="arm" data-idx="${i}" title="${w.name} — click to ban">${weaponIcon(w.id)}</button>`,
   ).join("") + `</div>`;
+}
+
+/** Map cards with rendered previews, so a card always looks like its map. */
+function mapGrid(selected: string): string {
+  return `<div class="maps" data-maps="${selected}">` + MAP_THEMES.map((m) => `
+    <button type="button" class="mapcard" data-map="${m.id}" aria-pressed="${m.id === selected}">
+      <canvas class="mapthumb" width="200" height="112" data-thumb="${m.id}"></canvas>
+      <span class="mp-name">${m.name}</span>
+      <span class="mp-blurb">${m.blurb}</span>
+    </button>`).join("") + `</div>`;
 }
 
 /** Ballistic-arc decoration for the masthead rail. */
@@ -196,6 +216,20 @@ export class UI {
       });
       el.dataset.mode = el.dataset.mode || "deathmatch";
     });
+    root.querySelectorAll<HTMLElement>("[data-maps]").forEach((el) => {
+      el.querySelectorAll<HTMLCanvasElement>("[data-thumb]").forEach((cv) => {
+        const theme = MAP_THEMES.find((m) => m.id === cv.dataset.thumb);
+        if (theme) paintThumbnail(cv, theme);
+      });
+      el.querySelectorAll<HTMLButtonElement>(".mapcard").forEach((btn) => {
+        btn.onclick = () => {
+          el.dataset.maps = btn.dataset.map!;
+          el.querySelectorAll(".mapcard").forEach((b) =>
+            b.setAttribute("aria-pressed", String(b === btn)));
+          sfx.ui();
+        };
+      });
+    });
     root.querySelectorAll<HTMLElement>("[data-armory]").forEach((el) => {
       el.querySelectorAll<HTMLButtonElement>(".arm").forEach((btn) => {
         const idx = parseInt(btn.dataset.idx!, 10);
@@ -235,12 +269,22 @@ export class UI {
       crates: bankVal("crates") === "on",
       bannedWeapons: [...this.banned],
       cinematics: bankVal("cine") === "on",
+      mapTheme: root.querySelector<HTMLElement>("[data-maps]")?.dataset.maps ?? "nightfall",
+      gravity: bankVal("gravity") as GravityMode,
+      pace: bankVal("pace") as PaceMode,
+      aimGuide: bankVal("guide") as MatchSettings["aimGuide"],
+      fallDamage: bankVal("falldmg") === "on",
+      friendlyFire: bankVal("ff") === "on",
+      startLevel: parseInt(bankVal("startlvl"), 10),
     };
   }
 
   private controlSurface(prefix: string): string {
     return `
       ${opsGrid("deathmatch")}
+      <div class="section-break"><span>Theatre</span></div>
+      ${mapGrid("nightfall")}
+      <div class="section-break"><span>Rules</span></div>
       ${bank("terrain", "Terrain", [
         { value: "hilly", label: "Hilly" },
         { value: "flat", label: "Flat" },
@@ -272,6 +316,34 @@ export class UI {
         { value: "on", label: "On" },
         { value: "off", label: "Off" },
       ], "on")}
+      ${bank("gravity", "Gravity", [
+        { value: "low", label: "Low" },
+        { value: "normal", label: "Normal" },
+        { value: "high", label: "High" },
+      ], "normal")}
+      ${bank("pace", "Shell Pace", [
+        { value: "cinematic", label: "Cinematic" },
+        { value: "normal", label: "Normal" },
+        { value: "fast", label: "Fast" },
+      ], "normal")}
+      ${bank("guide", "Aim Guide", [
+        { value: "full", label: "Full" },
+        { value: "short", label: "Short" },
+        { value: "off", label: "Off" },
+      ], "full")}
+      ${bank("falldmg", "Fall Damage", [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+      ], "on")}
+      ${bank("ff", "Friendly Fire", [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+      ], "on")}
+      ${bank("startlvl", "Start Level", [
+        { value: "0", label: "0" },
+        { value: "1", label: "1" },
+        { value: "2", label: "2" },
+      ], "0")}
       ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
       ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}
       <div class="section-break"><span>Armory · click to ban</span></div>
@@ -688,7 +760,7 @@ export class UI {
       const isBanned = bannedSet.has(i);
       slot.className = `weapon-slot${isBanned ? " banned" : ""}`;
       const key = i < 10 ? `${(i + 1) % 10}` : "";
-      slot.innerHTML = `<span class="key">${key}</span><span class="tier" style="display:none"></span><span class="icon">${w.icon}</span>`;
+      slot.innerHTML = `<span class="key">${key}</span><span class="tier" style="display:none"></span><span class="icon">${weaponIcon(w.id)}</span>`;
       slot.title = isBanned ? `${w.name} — BANNED` : `${w.name} — ${w.desc}`;
       if (!isBanned) slot.onclick = () => this.cb.onSelectWeapon(i);
       bar.appendChild(slot);
@@ -845,7 +917,7 @@ export class UI {
       const maxed = tier >= 2;
       return `
         <div class="upgrade-row ${maxed ? "maxed" : ""}">
-          <span class="icon">${w.icon}</span>
+          <span class="icon">${weaponIcon(w.id)}</span>
           <div class="info"><b>${w.tiers[tier].label}</b></div>
           <div class="tier-pips">
             ${[0, 1, 2].map((p) => `<span class="pip ${p <= tier ? "on" : ""}"></span>`).join("")}

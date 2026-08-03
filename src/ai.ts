@@ -1,4 +1,5 @@
-import { Tank, GRAVITY, TANK_RADIUS } from "./entities";
+import { Tank, TANK_RADIUS } from "./entities";
+import { physics } from "./physics";
 import { Terrain } from "./terrain";
 import { WEAPONS } from "./weapons";
 import { clamp, dist, pick } from "./util";
@@ -9,12 +10,7 @@ export interface AiPlan {
   power: number;
 }
 
-/**
- * Shared with game.ts firing code. Paired with the reduced GRAVITY in
- * entities.ts (v·k / g·k²) so range per power setting is unchanged while
- * shells stay in the air noticeably longer.
- */
-export const POWER_TO_VELOCITY = 7.7;
+
 
 /**
  * Cheap ballistic sim against the terrain mask. Returns the impact point,
@@ -26,7 +22,7 @@ function simulateImpact(
   angle: number, power: number,
   speedMul: number, gravityMul: number, windMul: number, wind: number,
 ): { x: number; y: number } {
-  const v = power * POWER_TO_VELOCITY * speedMul;
+  const v = power * physics.powerToVelocity * speedMul;
   // Longer flights need more integration headroom than the old fast shells.
   let x = startX, y = startY;
   let vx = Math.cos(angle) * v;
@@ -34,7 +30,7 @@ function simulateImpact(
   const dt = 1 / 60;
   for (let i = 0; i < 1400; i++) {
     vx += wind * windMul * dt;
-    vy += GRAVITY * gravityMul * dt;
+    vy += physics.gravity * gravityMul * dt;
     x += vx * dt;
     y += vy * dt;
     if (terrain.solid(x, y)) return { x, y };

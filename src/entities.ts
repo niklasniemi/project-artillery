@@ -2,18 +2,11 @@ import { Terrain } from "./terrain";
 import { WEAPONS, WeaponDef, WeaponTierStats } from "./weapons";
 import { clamp, TAU } from "./util";
 import { Loadout, TankType, TankAttrs, TankPalette, typeById, paletteFor, drawChassis } from "./tanks";
+import { physics } from "./physics";
 
 export const TANK_RADIUS = 14;
 const CLIMB_LIMIT = 14;       // max pixels of slope a tank can climb per step
 const FALL_DAMAGE_START = 90; // free-fall pixels before damage
-
-/**
- * Muzzle velocity and gravity are scaled together (v·k, g·k²) relative to the
- * original tuning. That leaves trajectory shapes and the power-to-range
- * mapping untouched while stretching flight time by 1/k, so shots read
- * clearly instead of snapping across the map.
- */
-export const GRAVITY = 350;
 
 export type { TankPalette };
 
@@ -126,7 +119,7 @@ export class Tank {
       return 0;
     }
     if (this.fallFrom < 0) this.fallFrom = this.y;
-    this.vy += GRAVITY * dt;
+    this.vy += physics.gravity * dt;
     this.y += this.vy * dt;
     const surface = terrain.surfaceY(this.x, Math.max(0, this.y - 2) | 0);
     if (surface >= 0 && this.y >= surface) this.y = surface;
@@ -169,7 +162,9 @@ export class Tank {
       ctx.globalAlpha = 1;
     }
 
-    drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS);
+    // Drawn a little larger than the collision radius so the chassis detail
+    // is readable. Purely cosmetic — TANK_RADIUS still governs hits.
+    drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS * 1.3);
 
     // HP bar + name
     const w = 40;
