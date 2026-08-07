@@ -44,6 +44,12 @@ export class Tank {
   weaponTiers: number[] = WEAPONS.map(() => 0);
   selectedWeapon = 0;
   damageDealt = 0;
+  /** Rounds left per weapon; Infinity when the host set no limit. */
+  ammo: number[] = WEAPONS.map(() => Infinity);
+
+  hasAmmo(index: number): boolean {
+    return (this.ammo[index] ?? 0) > 0;
+  }
 
   constructor(
     public readonly name: string,
@@ -162,6 +168,22 @@ export class Tank {
       ctx.globalAlpha = 1;
     }
 
+    // Soft contact shadow so the tank sits in the ground rather than on it.
+    const shadowW = TANK_RADIUS * 2.2;
+    const sg = ctx.createRadialGradient(x, y + 1, 1, x, y + 1, shadowW);
+    sg.addColorStop(0, "rgba(0,0,0,0.42)");
+    sg.addColorStop(0.6, "rgba(0,0,0,0.16)");
+    sg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.save();
+    ctx.translate(x, y + 1);
+    ctx.scale(1, 0.3);
+    ctx.translate(-x, -(y + 1));
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.arc(x, y + 1, shadowW, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
     // Drawn a little larger than the collision radius so the chassis detail
     // is readable. Purely cosmetic — TANK_RADIUS still governs hits.
     drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS * 1.3);
@@ -194,6 +216,80 @@ export class Tank {
       ctx.fill();
     }
 
+    ctx.restore();
+  }
+}
+
+/**
+ * A deployed energy dome. Unlike the old terrain dome this is a real object,
+ * which is what makes one-way protection possible: shots crossing *inward*
+ * from outside are stopped, shots crossing *outward* from inside pass freely.
+ */
+export class Shield {
+  hits: number;
+  turnsLeft: number;
+  /** Flash timer so a blocked hit reads visually. */
+  flash = 0;
+
+  constructor(
+    public x: number,
+    public y: number,
+    public radius: number,
+    public ownerSeat: number,
+    public team: number,
+    public color: string,
+    hits = 3,
+    turns = 3,
+  ) {
+    this.hits = hits;
+    this.turnsLeft = turns;
+  }
+
+  get dead(): boolean {
+    return this.hits <= 0 || this.turnsLeft <= 0;
+  }
+
+  /** Shots are only stopped by the dome itself, never below its base line. */
+  coversPoint(px: number, py: number): boolean {
+    if (py > this.y) return false;
+    const dx = px - this.x, dy = py - this.y;
+    return dx * dx + dy * dy <= this.radius * this.radius;
+  }
+
+  draw(ctx: CanvasRenderingContext2D): void {
+    const life = clamp(this.turnsLeft / 3, 0.25, 1);
+    const shimmer = 0.5 + 0.5 * Math.sin(performance.now() / 260 + this.x * 0.01);
+    ctx.save();
+
+    // Body: faint energy fill inside the dome.
+    const g = ctx.createRadialGradient(this.x, this.y, this.radius * 0.2, this.x, this.y, this.radius);
+    g.addColorStop(0, "rgba(255,255,255,0)");
+    g.addColorStop(0.78, `rgba(120, 235, 255, ${0.05 * life})`);
+    g.addColorStop(1, `rgba(120, 235, 255, ${0.16 * life})`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, Math.PI, TAU);
+    ctx.closePath();
+    ctx.fill();
+
+    // Rim, brighter right after absorbing a hit.
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = this.color;
+    ctx.globalAlpha = clamp(0.35 * life + shimmer * 0.18 + this.flash, 0, 1);
+    ctx.lineWidth = 2.5 + this.flash * 4;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, Math.PI, TAU);
+    ctx.stroke();
+
+    // Remaining-charge ticks along the crown.
+    ctx.globalAlpha = 0.55 * life;
+    ctx.lineWidth = 3;
+    for (let i = 0; i < this.hits; i++) {
+      const a = Math.PI + (i + 1) * (Math.PI / (this.hits + 1));
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.radius - 7, a - 0.06, a + 0.06);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }

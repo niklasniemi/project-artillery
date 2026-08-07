@@ -2,12 +2,24 @@ import { seededRandom, TAU } from "./util";
 
 export type WeatherKind = "none" | "snow" | "ash" | "sand" | "spore";
 
-/** Colour ramp used when rasterizing the terrain mask. */
+/**
+ * Colour ramp used when rasterizing the terrain mask. The surface is built as
+ * three soft bands — lit crest, topsoil, then body — rather than a hard lip,
+ * which is what used to read as an outline.
+ */
 export interface TerrainPaint {
-  lip: [number, number, number];   // sunlit top edge
-  base: [number, number, number];  // body colour at the surface
-  depth: [number, number, number]; // amount subtracted at full depth
+  /** Sunlit crest, the top few pixels. */
+  lip: [number, number, number];
+  /** Topsoil / grass layer sitting under the crest. */
+  soil: [number, number, number];
+  /** Body colour just below the soil band. */
+  base: [number, number, number];
+  /** Amount subtracted from `base` at full depth. */
+  depth: [number, number, number];
   noise: number;
+  /** Thickness in pixels of the crest + soil banding. */
+  crest: number;
+  soilBand: number;
 }
 
 export interface MapTheme {
@@ -40,7 +52,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "255,120,45", strength: 0.34 },
     ridges: ["rgba(9,10,18,0.55)", "rgba(5,6,12,0.72)"],
     orb: { fill: "#171d2e", stroke: "rgba(236,228,210,0.32)", xf: 0.83, yf: 0.17, r: 54 },
-    terrain: { lip: [255, 208, 150], base: [44, 40, 62], depth: [20, 20, 28], noise: 14 },
+    terrain: { lip: [176, 150, 108], soil: [96, 78, 62], base: [56, 48, 62], depth: [24, 22, 28], noise: 12, crest: 5, soilBand: 16 },
     voidGlow: ["255, 128, 40", "255, 226, 178"],
     weather: "none", weatherColor: "#ffffff",
   },
@@ -55,7 +67,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "255, 214, 140", strength: 0.5 },
     ridges: ["rgba(120,74,32,0.45)", "rgba(74,44,20,0.6)"],
     orb: { fill: "#ffe6b0", stroke: "rgba(255,240,200,0.55)", xf: 0.24, yf: 0.22, r: 46 },
-    terrain: { lip: [255, 232, 178], base: [126, 84, 40], depth: [56, 40, 22], noise: 16 },
+    terrain: { lip: [242, 214, 156], soil: [196, 146, 82], base: [138, 96, 50], depth: [58, 42, 24], noise: 14, crest: 6, soilBand: 20 },
     voidGlow: ["222, 160, 70", "255, 238, 196"],
     weather: "sand", weatherColor: "#e8c48a",
   },
@@ -70,7 +82,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "90, 240, 210", strength: 0.28 },
     ridges: ["rgba(16,40,58,0.6)", "rgba(8,22,36,0.75)"],
     orb: { fill: "#0f2436", stroke: "rgba(190,240,255,0.4)", xf: 0.78, yf: 0.15, r: 50 },
-    terrain: { lip: [236, 250, 255], base: [92, 116, 140], depth: [46, 52, 58], noise: 12 },
+    terrain: { lip: [238, 248, 255], soil: [186, 208, 226], base: [104, 126, 150], depth: [46, 52, 58], noise: 10, crest: 7, soilBand: 18 },
     voidGlow: ["80, 210, 255", "226, 250, 255"],
     weather: "snow", weatherColor: "#eaf6ff",
   },
@@ -85,7 +97,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "255, 80, 20", strength: 0.46 },
     ridges: ["rgba(24,10,10,0.6)", "rgba(12,5,5,0.78)"],
     orb: null,
-    terrain: { lip: [255, 150, 90], base: [50, 34, 32], depth: [24, 16, 14], noise: 18 },
+    terrain: { lip: [176, 96, 62], soil: [98, 62, 52], base: [58, 42, 40], depth: [24, 18, 16], noise: 15, crest: 4, soilBand: 14 },
     voidGlow: ["255, 70, 20", "255, 210, 150"],
     weather: "ash", weatherColor: "#c9b7a8",
   },
@@ -100,7 +112,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "150, 255, 150", strength: 0.24 },
     ridges: ["rgba(10,32,22,0.6)", "rgba(5,18,12,0.76)"],
     orb: { fill: "#12301f", stroke: "rgba(200,255,190,0.3)", xf: 0.72, yf: 0.19, r: 44 },
-    terrain: { lip: [214, 255, 170], base: [58, 78, 48], depth: [28, 36, 24], noise: 15 },
+    terrain: { lip: [138, 190, 92], soil: [92, 132, 62], base: [66, 84, 54], depth: [30, 38, 26], noise: 13, crest: 7, soilBand: 18 },
     voidGlow: ["120, 240, 120", "230, 255, 210"],
     weather: "spore", weatherColor: "#c8ff9a",
   },
@@ -115,7 +127,7 @@ export const MAP_THEMES: MapTheme[] = [
     horizon: { color: "80, 180, 255", strength: 0.2 },
     ridges: ["rgba(8,14,30,0.5)", "rgba(4,8,18,0.7)"],
     orb: { fill: "#16263f", stroke: "rgba(140,210,255,0.45)", xf: 0.8, yf: 0.2, r: 68 },
-    terrain: { lip: [180, 226, 255], base: [66, 74, 92], depth: [30, 34, 42], noise: 10 },
+    terrain: { lip: [150, 186, 214], soil: [104, 122, 148], base: [72, 82, 100], depth: [30, 34, 42], noise: 9,  crest: 5, soilBand: 16 },
     voidGlow: ["70, 170, 255", "210, 240, 255"],
     weather: "none", weatherColor: "#ffffff",
   },

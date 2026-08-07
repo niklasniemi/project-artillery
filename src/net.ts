@@ -69,6 +69,12 @@ export interface PublicRoom {
   terrain: string;
 }
 
+export interface SelectState {
+  picked: number;
+  total: number;
+  names: string[];
+}
+
 export interface StartPayload {
   seed: number;
   settings: MatchSettings;
@@ -114,10 +120,13 @@ export class Net {
 
   onLobby: (view: LobbyView) => void = () => {};
   onStart: (payload: StartPayload) => void = () => {};
+  onSelecting: (state: SelectState) => void = () => {};
+  onSelectState: (state: SelectState) => void = () => {};
   onAim: (seat: number, angle: number, power: number) => void = () => {};
   onDrive: (seat: number, x: number, y: number, fuel: number, facing: 1 | -1) => void = () => {};
   onFire: (seat: number, msg: FireMsg) => void = () => {};
   onSplit: (seat: number, msg: SplitMsg) => void = () => {};
+  onDeploy: (seat: number, msg: SplitMsg) => void = () => {};
   onUpgrade: (seat: number, weaponIndex: number) => void = () => {};
   onCrate: (seat: number, index: number) => void = () => {};
   onAdvance: (nextSeat: number, snapshot: Snapshot | null, gameOver: boolean) => void = () => {};
@@ -185,12 +194,15 @@ export class Net {
       this.lastLobby = view;
       this.onLobby(view);
     });
+    room.onMessage("selecting", (s: SelectState) => this.onSelecting(s));
+    room.onMessage("selectState", (s: SelectState) => this.onSelectState(s));
     room.onMessage("start", (payload: StartPayload) => this.onStart(payload));
     room.onMessage("aim", (m: { seat: number; angle: number; power: number }) => this.onAim(m.seat, m.angle, m.power));
     room.onMessage("drive", (m: { seat: number; x: number; y: number; fuel: number; facing: 1 | -1 }) =>
       this.onDrive(m.seat, m.x, m.y, m.fuel, m.facing));
     room.onMessage("fire", (m: FireMsg & { seat: number }) => this.onFire(m.seat, m));
     room.onMessage("split", (m: SplitMsg & { seat: number }) => this.onSplit(m.seat, m));
+    room.onMessage("deploy", (m: SplitMsg & { seat: number }) => this.onDeploy(m.seat, m));
     room.onMessage("upgrade", (m: { seat: number; weaponIndex: number }) => this.onUpgrade(m.seat, m.weaponIndex));
     room.onMessage("crate", (m: { seat: number; index: number }) => this.onCrate(m.seat, m.index));
     room.onMessage("advance", (m: { nextSeat: number; snapshot: Snapshot | null; gameOver: boolean }) =>

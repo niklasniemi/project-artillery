@@ -4,7 +4,8 @@ import { TerrainPaint } from "./themes";
 export type TerrainType = "hilly" | "flat" | "cavern" | "islands";
 
 const DEFAULT_PAINT: TerrainPaint = {
-  lip: [255, 208, 150], base: [44, 40, 62], depth: [20, 20, 28], noise: 14,
+  lip: [176, 150, 108], soil: [96, 78, 62], base: [56, 48, 62],
+  depth: [24, 22, 28], noise: 12, crest: 5, soilBand: 16,
 };
 
 /**
@@ -149,33 +150,97 @@ export class Terrain {
     const d = img.data;
     const rand = seededRandom(1337);
     // Named depthRamp to avoid shadowing the per-column depth counter below.
-    const { lip, base, depth: depthRamp, noise: noiseAmt } = this.paint;
-    // Precompute per-column depth-from-surface for shading.
-    for (let x = 0; x < this.width; x++) {
+    const { lip, soil, base, depth: depthRamp, noise: noiseAmt, crest, soilBand } = this.paint;
+    const w = this.width, h = this.height;
+    const mask = this.mask;
+
+    for (let x = 0; x < w; x++) {
       let depth = -1;
-      for (let y = 0; y < this.height; y++) {
-        const mi = y * this.width + x;
-        if (this.mask[mi] === 1) {
+      for (let y = 0; y < h; y++) {
+        const mi = y * w + x;
+        if (mask[mi] === 1) {
           depth = depth < 0 ? 0 : depth + 1;
         } else {
           depth = -1;
           continue;
         }
+
         const i = mi * 4;
         const n = rand() * noiseAmt;
-        if (depth < 3) {
-          // Sunlit surface lip, in the map theme's own light.
-          d[i] = lip[0]; d[i + 1] = lip[1]; d[i + 2] = lip[2]; d[i + 3] = 255;
+
+        let r: number, g: number, b: number;
+        if (depth < crest) {
+          // Lit crest, easing into the soil rather than stopping dead.
+          const t = depth / crest;
+          r = lip[0] + (soil[0] - lip[0]) * t * t;
+          g = lip[1] + (soil[1] - lip[1]) * t * t;
+          b = lip[2] + (soil[2] - lip[2]) * t * t;
+        } else if (depth < crest + soilBand) {
+          // Topsoil fading into the body.
+          const t = (depth - crest) / soilBand;
+          r = soil[0] + (base[0] - soil[0]) * t;
+          g = soil[1] + (base[1] - soil[1]) * t;
+          b = soil[2] + (base[2] - soil[2]) * t;
+          // Ambient occlusion just under the surface reads as depth.
+          const ao = 1 - 0.16 * Math.sin(t * Math.PI);
+          r *= ao; g *= ao; b *= ao;
         } else {
-          const t = Math.min(1, depth / 260);
-          d[i] = base[0] - t * depthRamp[0] + n;
-          d[i + 1] = base[1] - t * depthRamp[1] + n * 0.7;
-          d[i + 2] = base[2] - t * depthRamp[2] + n * 0.9;
-          d[i + 3] = 255;
+          const t = Math.min(1, (depth - crest - soilBand) / 260);
+          r = base[0] - t * depthRamp[0];
+          g = base[1] - t * depthRamp[1];
+          b = base[2] - t * depthRamp[2];
+          // Faint horizontal strata so the body is not a flat wash.
+          const strata = Math.sin(y * 0.055 + x * 0.004) * 3.5;
+          r += strata; g += strata * 0.8; b += strata * 0.9;
         }
+
+        d[i] = r + n;
+        d[i + 1] = g + n * 0.7;
+        d[i + 2] = b + n * 0.9;
+        // Coverage-based alpha: interior stays opaque, edges soften. This is
+        // what removes the hard jagged outline the binary mask produced.
+        d[i + 3] = 255;
       }
     }
+
+    this.antialiasEdges(d);
     this.ctx.putImageData(img, 0, 0);
+  }
+
+  /**
+   * Softens the silhouette by setting edge alpha from local mask coverage.
+   * Interior pixels early-out, so only the thin boundary pays for the 3×3 tap.
+   */
+  private antialiasEdges(d: Uint8ClampedArray): void {
+    const w = this.width, h = this.height;
+    const mask = this.mask;
+    for (let y = 0; y < h; y++) {
+      const up = y > 0 ? -w : 0;
+      const dn = y < h - 1 ? w : 0;
+      for (let x = 0; x < w; x++) {
+        const mi = y * w + x;
+        if (mask[mi] === 0) continue;
+        const lf = x > 0 ? -1 : 0;
+        const rt = x < w - 1 ? 1 : 0;
+        // Fully surrounded? Leave it opaque — the common case.
+        if (mask[mi + up] === 1 && mask[mi + dn] === 1 &&
+            mask[mi + lf] === 1 && mask[mi + rt] === 1) continue;
+        let cover = 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          const yy = y + oy;
+          if (yy < 0 || yy >= h) continue;
+          for (let ox = -1; ox <= 1; ox++) {
+            const xx = x + ox;
+            if (xx < 0 || xx >= w) continue;
+            cover += mask[yy * w + xx];
+          }
+        }
+        // Gamma-curved coverage: slivers fade out cleanly while mostly-covered
+        // pixels stay solid, which reads as a smooth edge rather than a haze.
+        // Only the visual alpha changes — the mask remains the physics truth.
+        d[mi * 4 + 3] = Math.min(255, Math.pow(cover / 9, 0.7) * 255);
+      }
+    }
   }
 
   /** Remove a disc of terrain (explosion crater) with a scorched rim. */
@@ -187,18 +252,17 @@ export class Terrain {
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, TAU);
     ctx.fill();
-    // Scorch the crater rim on remaining terrain.
+    // Scorch: a soft radial falloff on the surviving ground rather than a
+    // hard ring, so craters blend into the terrain instead of outlining it.
     ctx.globalCompositeOperation = "source-atop";
-    ctx.strokeStyle = "rgba(255, 120, 40, 0.55)";
-    ctx.lineWidth = 3;
+    const scorch = ctx.createRadialGradient(cx, cy, r * 0.9, cx, cy, r * 1.75);
+    scorch.addColorStop(0, "rgba(18, 10, 8, 0.62)");
+    scorch.addColorStop(0.45, "rgba(40, 22, 14, 0.3)");
+    scorch.addColorStop(1, "rgba(40, 22, 14, 0)");
+    ctx.fillStyle = scorch;
     ctx.beginPath();
-    ctx.arc(cx, cy, r + 1, 0, TAU);
-    ctx.stroke();
-    ctx.strokeStyle = "rgba(10, 6, 14, 0.7)";
-    ctx.lineWidth = 7;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + 5, 0, TAU);
-    ctx.stroke();
+    ctx.arc(cx, cy, r * 1.75, 0, TAU);
+    ctx.fill();
     ctx.restore();
   }
 
@@ -212,11 +276,13 @@ export class Terrain {
     ctx.ellipse(cx, cy, rx, ry, 0, 0, TAU);
     ctx.fill();
     ctx.globalCompositeOperation = "source-atop";
-    ctx.strokeStyle = "rgba(120, 80, 40, 0.6)";
-    ctx.lineWidth = 5;
+    const seam = ctx.createRadialGradient(cx, cy, Math.min(rx, ry) * 0.8, cx, cy, Math.max(rx, ry) * 1.3);
+    seam.addColorStop(0, "rgba(26, 16, 10, 0.5)");
+    seam.addColorStop(1, "rgba(26, 16, 10, 0)");
+    ctx.fillStyle = seam;
     ctx.beginPath();
-    ctx.ellipse(cx, cy, rx + 2, ry + 2, 0, 0, TAU);
-    ctx.stroke();
+    ctx.ellipse(cx, cy, rx * 1.4, ry * 1.5, 0, 0, TAU);
+    ctx.fill();
     ctx.restore();
   }
 

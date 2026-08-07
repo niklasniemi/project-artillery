@@ -1,6 +1,9 @@
 import { Room, Client } from "colyseus";
 import { publish, unpublish } from "./registry";
 
+/** How long everyone gets to pick a chassis before the match starts anyway. */
+const SELECT_GRACE_MS = 45_000;
+
 interface Loadout {
   type: string;
   color: number;
@@ -12,6 +15,8 @@ interface PlayerInfo {
   ready: boolean;
   connected: boolean;
   loadout: Loadout;
+  /** Confirmed their chassis during the pre-match selection step. */
+  picked: boolean;
 }
 
 /**
@@ -25,7 +30,8 @@ export class ArtilleryRoom extends Room {
 
   private players = new Map<string, PlayerInfo>();
   private hostId = "";
-  private phase: "lobby" | "playing" = "lobby";
+  private phase: "lobby" | "selecting" | "playing" = "lobby";
+  private selectTimer: ReturnType<typeof setTimeout> | null = null;
   private isPublic = true;
   private settings: {
     turnSeconds?: number; mode?: string; mapTheme?: string; terrainType?: string;
@@ -50,11 +56,20 @@ export class ArtilleryRoom extends Room {
 
     this.onMessage("loadout", (client, l: Loadout) => {
       const p = this.players.get(client.sessionId);
-      if (!p || this.phase !== "lobby" || !l) return;
+      if (!p || this.phase === "playing" || !l) return;
       p.loadout = {
         type: String(l.type ?? "vanguard").slice(0, 24),
         color: Number.isFinite(l.color) ? Math.max(0, Math.floor(l.color)) : p.seat,
       };
+      if (this.phase === "selecting") {
+        // Confirmed during the pre-match chassis step.
+        p.picked = true;
+        this.broadcast("selectState", this.selectState());
+        if ([...this.players.values()].every((pl) => !pl.connected || pl.picked)) {
+          this.beginMatch();
+        }
+        return;
+      }
       this.broadcastLobby();
     });
 
@@ -68,7 +83,7 @@ export class ArtilleryRoom extends Room {
     this.onMessage("start", (client) => this.startMatch(client));
 
     // Live-input relays, gated to the seat whose turn it is.
-    for (const type of ["aim", "drive", "split", "crate"]) {
+    for (const type of ["aim", "drive", "split", "deploy", "crate"]) {
       this.onMessage(type, (client, msg: object) => {
         const p = this.players.get(client.sessionId);
         if (!p || this.phase !== "playing" || p.seat !== this.currentSeat) return;
@@ -107,6 +122,7 @@ export class ArtilleryRoom extends Room {
     this.players.set(client.sessionId, {
       name, seat, ready: false, connected: true,
       loadout: { type: "vanguard", color: seat },
+      picked: false,
     });
     if (!this.hostId) this.hostId = client.sessionId;
     this.broadcastLobby();
@@ -125,17 +141,28 @@ export class ArtilleryRoom extends Room {
     }
     // In-game: the tank stays as a sitting duck; skip their turns.
     p.connected = false;
+    if (this.phase === "selecting") {
+      this.broadcast("selectState", this.selectState());
+      if ([...this.players.values()].every((pl) => !pl.connected || pl.picked)) this.beginMatch();
+      return;
+    }
     if (p.seat === this.currentSeat) this.forceSkip();
     if ([...this.players.values()].every((pl) => !pl.connected)) this.disconnect();
   }
 
   onDispose(): void {
     this.clearTimer();
+    if (this.selectTimer) clearTimeout(this.selectTimer);
     unpublish(this.roomId);
   }
 
   // ---------- Match flow ----------
 
+  /**
+   * Host pressed start: everyone picks a chassis before the match opens.
+   * The match begins once all connected players confirm, or after a grace
+   * period so one idle player cannot hold the room hostage.
+   */
   private startMatch(client: Client): void {
     if (client.sessionId !== this.hostId || this.phase !== "lobby") return;
     const list = [...this.players.values()];
@@ -145,16 +172,37 @@ export class ArtilleryRoom extends Room {
       .every(([, p]) => p.ready);
     if (!nonHostReady) return;
 
-    this.phase = "playing";
+    this.phase = "selecting";
     this.lock();
-    // Drop out of the browser for the duration of the match.
     unpublish(this.roomId);
+    for (const p of this.players.values()) p.picked = false;
+
+    this.broadcast("selecting", this.selectState());
+    if (this.selectTimer) clearTimeout(this.selectTimer);
+    this.selectTimer = setTimeout(() => this.beginMatch(), SELECT_GRACE_MS);
+  }
+
+  private selectState(): { picked: number; total: number; names: string[] } {
+    const live = [...this.players.values()].filter((p) => p.connected);
+    return {
+      picked: live.filter((p) => p.picked).length,
+      total: live.length,
+      names: live.filter((p) => !p.picked).map((p) => p.name),
+    };
+  }
+
+  private beginMatch(): void {
+    if (this.phase !== "selecting") return;
+    if (this.selectTimer) { clearTimeout(this.selectTimer); this.selectTimer = null; }
+    this.phase = "playing";
+
     const seed = Math.floor(Math.random() * 1e9);
-    const seats = list
+    const seats = [...this.players.values()]
       .sort((a, b) => a.seat - b.seat)
       .map((p) => ({ seat: p.seat, name: p.name, loadout: p.loadout }));
     for (const c of this.clients) {
-      const p = this.players.get(c.sessionId)!;
+      const p = this.players.get(c.sessionId);
+      if (!p) continue;
       c.send("start", { seed, settings: this.settings, seats, mySeat: p.seat });
     }
     this.currentSeat = seats[0].seat;

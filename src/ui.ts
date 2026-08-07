@@ -8,6 +8,7 @@ import { TANK_TYPES, TANK_COLORS, Loadout, typeById, paletteFor, drawChassis } f
 import { MAP_THEMES, paintThumbnail } from "./themes";
 import { GravityMode, PaceMode } from "./physics";
 import { weaponIcon } from "./icons";
+import { TitleScene } from "./titlescene";
 
 export type GameMode = "deathmatch" | "points" | "juggernaut" | "assassination";
 
@@ -41,12 +42,14 @@ export interface MatchSettings {
   mapTheme: string;
   gravity: GravityMode;
   pace: PaceMode;
-  aimGuide: "off" | "short" | "full";
+  aimGuide: "off" | "tiny" | "short" | "long";
   fallDamage: boolean;
   friendlyFire: boolean;
   startLevel: number;
   fuelResupply: "off" | "partial" | "full";
   visibility: "public" | "private";
+  /** Rounds per weapon; 0 means unlimited. Shell is always unlimited. */
+  ammoLimit: number;
 }
 
 export interface LobbyPlayer {
@@ -78,6 +81,7 @@ interface UICallbacks {
   onLeaveRoom: () => void;
   onLoadout: (loadout: Loadout) => void;
   onListRooms: () => Promise<PublicRoomView[]>;
+  onQuitMatch: () => void;
 }
 
 export interface PublicRoomView {
@@ -194,7 +198,12 @@ export class UI {
   private fpsEl!: HTMLElement;
   private upgradeOverlay: HTMLElement | null = null;
   private lobbyOverlay: HTMLElement | null = null;
+  private pauseOverlay: HTMLElement | null = null;
+  private modalOverlay: HTMLElement | null = null;
+  private selectOverlay: HTMLElement | null = null;
+  private waitOverlay: HTMLElement | null = null;
   private banned = new Set<number>();
+  private titleScene: TitleScene | null = null;
 
   constructor(private cb: UICallbacks) {}
 
@@ -258,6 +267,70 @@ export class UI {
     this.syncConditionalRows(root);
   }
 
+  /** Opens a config section in a centred modal over a blurred backdrop. */
+  private openModal(root: HTMLElement, key: string): void {
+    this.closeModal();
+    const section = root.querySelector<HTMLElement>(`[data-section="${key}"]`);
+    if (!section) return;
+    const home = section.parentElement!;
+    const title = { theatre: "Theatre", rules: "Match rules", armory: "Armory" }[key] ?? key;
+
+    const overlay = document.createElement("div");
+    overlay.className = "overlay blur";
+    overlay.innerHTML = `
+      <div class="panel modal wide">
+        <div class="modal-head">
+          <h2>${title}</h2>
+          <button type="button" class="modal-x" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body"></div>
+        <button class="btn fire-key" data-done>Done ▸</button>
+      </div>`;
+    overlay.querySelector<HTMLElement>(".modal-body")!.appendChild(section);
+
+    const close = (): void => {
+      home.appendChild(section);          // hand the live section back
+      overlay.remove();
+      this.modalOverlay = null;
+      this.refreshSummaries(root);
+    };
+    overlay.querySelector<HTMLButtonElement>(".modal-x")!.onclick = () => { sfx.ui(); close(); };
+    overlay.querySelector<HTMLButtonElement>("[data-done]")!.onclick = () => { sfx.ui(); close(); };
+    overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) close(); });
+
+    this.menu.appendChild(overlay);
+    this.modalOverlay = overlay;
+  }
+
+  closeModal(): void {
+    if (!this.modalOverlay) return;
+    (this.modalOverlay.querySelector<HTMLButtonElement>("[data-done]"))?.click();
+    this.modalOverlay?.remove();
+    this.modalOverlay = null;
+  }
+
+  /** Keeps each trigger button showing what is currently selected. */
+  private refreshSummaries(root: HTMLElement): void {
+    const bankVal = (id: string): string =>
+      root.querySelector<HTMLElement>(`[data-bank="${id}"]`)?.dataset.value ?? "";
+    const mapId = root.querySelector<HTMLElement>("[data-maps]")?.dataset.maps ?? "nightfall";
+    const mapName = MAP_THEMES.find((m) => m.id === mapId)?.name ?? mapId;
+    const set = (key: string, text: string): void => {
+      const el = root.querySelector<HTMLElement>(`[data-sum="${key}"]`);
+      if (el) el.textContent = text;
+    };
+    set("theatre", `${mapName} · ${bankVal("terrain")}`);
+    const bits = [`${bankVal("wind")} wind`];
+    const timer = bankVal("timer");
+    bits.push(timer === "0" ? "no clock" : `${timer}s`);
+    if (bankVal("ammo") !== "0") bits.push(`${bankVal("ammo")} rounds`);
+    if (bankVal("resupply") !== "off") bits.push("resupply");
+    set("rules", bits.join(" · "));
+    set("armory", this.banned.size === 0
+      ? "All guns enabled"
+      : `${this.banned.size} banned`);
+  }
+
   /** Rounds only matters in Points — grey it out elsewhere. */
   private syncConditionalRows(root: HTMLElement): void {
     const mode = root.querySelector<HTMLElement>("[data-ops]")?.dataset.mode;
@@ -293,21 +366,55 @@ export class UI {
       // Only the host flow carries this switch; local play defaults to public.
       visibility: (root.querySelector<HTMLElement>('[data-bank="visibility"]')?.dataset.value
         ?? "public") as MatchSettings["visibility"],
+      ammoLimit: parseInt(bankVal("ammo"), 10),
     };
   }
 
-  private controlSurface(prefix: string): string {
+  /**
+   * Settings live in the DOM (each control stores its own value), so modals
+   * *move* a section in and out rather than re-rendering it. That keeps every
+   * selection and event handler intact across opens.
+   */
+  private configSurface(prefix: string): string {
     return `
       ${opsGrid("deathmatch")}
-      <div class="section-break"><span>Theatre</span></div>
-      ${mapGrid("nightfall")}
-      <div class="section-break"><span>Rules</span></div>
-      ${bank("terrain", "Terrain", [
-        { value: "hilly", label: "Hilly" },
-        { value: "flat", label: "Flat" },
-        { value: "cavern", label: "Cavern" },
-        { value: "islands", label: "Islands" },
-      ], "hilly")}
+      <div class="triggers">
+        <button type="button" class="trigger" data-modal="theatre">
+          <span class="tg-name">Theatre</span>
+          <span class="tg-sum" data-sum="theatre">Nightfall · Hilly</span>
+        </button>
+        <button type="button" class="trigger" data-modal="rules">
+          <span class="tg-name">Rules</span>
+          <span class="tg-sum" data-sum="rules">Standard</span>
+        </button>
+        <button type="button" class="trigger" data-modal="armory">
+          <span class="tg-name">Armory</span>
+          <span class="tg-sum" data-sum="armory">All guns enabled</span>
+        </button>
+      </div>
+      <div class="stash" hidden>
+        <div data-section="theatre">
+          ${mapGrid("nightfall")}
+          ${bank("terrain", "Terrain", [
+            { value: "hilly", label: "Hilly" },
+            { value: "flat", label: "Flat" },
+            { value: "cavern", label: "Cavern" },
+            { value: "islands", label: "Islands" },
+          ], "hilly")}
+        </div>
+        <div data-section="rules">${this.rulesMarkup(prefix)}</div>
+        <div data-section="armory">
+          <div class="note">Click a gun to ban it from the match. The basic Shell
+            always stays available.</div>
+          ${armoryGrid()}
+        </div>
+      </div>`;
+  }
+
+  private rulesMarkup(prefix: string): string {
+    // Terrain lives in the Theatre modal; armory has its own. Everything else
+    // is a rule and belongs here.
+    return `
       ${bank("wind", "Wind", [
         { value: "none", label: "None" },
         { value: "low", label: "Low" },
@@ -344,10 +451,11 @@ export class UI {
         { value: "fast", label: "Fast" },
       ], "normal")}
       ${bank("guide", "Aim Guide", [
-        { value: "full", label: "Full" },
-        { value: "short", label: "Short" },
         { value: "off", label: "Off" },
-      ], "full")}
+        { value: "tiny", label: "Minimal" },
+        { value: "short", label: "Short" },
+        { value: "long", label: "Long" },
+      ], "short")}
       ${bank("falldmg", "Fall Damage", [
         { value: "on", label: "On" },
         { value: "off", label: "Off" },
@@ -366,21 +474,66 @@ export class UI {
         { value: "partial", label: "+40%/turn" },
         { value: "full", label: "Full/turn" },
       ], "off")}
+      ${bank("ammo", "Ammo Per Gun", [
+        { value: "0", label: "Unlimited" },
+        { value: "1", label: "1" },
+        { value: "2", label: "2" },
+        { value: "3", label: "3" },
+      ], "0")}
       ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
-      ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}
-      <div class="section-break"><span>Armory · click to ban</span></div>
-      ${armoryGrid()}`;
+      ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}`;
   }
 
   // ---------- Main menu ----------
 
+  /** Landing screen: animated scene plus the two ways in. */
   showMenu(): void {
-    const savedName = localStorage.getItem("pa-name") ?? `Gunner-${Math.floor(Math.random() * 900 + 100)}`;
-    const savedServer = storedServerUrl();
+    this.closeModal();
+    this.closeLobby();
     this.menu.innerHTML = `
+      <div class="title">
+        <canvas class="title-bg" id="m-bg" width="1600" height="900"></canvas>
+        <div class="title-inner">
+          <div class="title-mark">
+            <span class="stamp">MK·IV / Live Fire</span>
+            <h1 class="title-name">Project<em>Artillery</em></h1>
+            <p class="title-tag">Turn-based tactical artillery · no ranks, no grind,
+              every gun unlocked from the first shot.</p>
+          </div>
+          <div class="title-paths">
+            <button type="button" class="path" id="m-local">
+              <span class="p-num">01</span>
+              <span class="p-name">Local Game</span>
+              <span class="p-desc">Hot-seat or against bots on this machine.</span>
+            </button>
+            <button type="button" class="path" id="m-online">
+              <span class="p-num">02</span>
+              <span class="p-name">Online Game</span>
+              <span class="p-desc">Host a room or join friends, up to eight guns.</span>
+            </button>
+          </div>
+        </div>
+        <div class="title-foot">Esc pauses · F3 perf · M mute</div>
+      </div>`;
+
+    const canvas = this.menu.querySelector<HTMLCanvasElement>("#m-bg")!;
+    this.titleScene?.stop();
+    this.titleScene = new TitleScene(canvas);
+    this.titleScene.start();
+
+    this.menu.querySelector<HTMLButtonElement>("#m-local")!.onclick = () => {
+      sfx.unlock(); sfx.ui(); this.showLocalSetup();
+    };
+    this.menu.querySelector<HTMLButtonElement>("#m-online")!.onclick = () => {
+      sfx.unlock(); sfx.ui(); this.showOnlineSetup();
+    };
+  }
+
+  private setupShell(id: string, title: string, hint: string, body: string): string {
+    return `
       <div class="doc">
         <aside class="doc-rail">
-          <div class="stamp">MK·IV / LIVE FIRE</div>
+          <div class="stamp">MK·IV / Live Fire</div>
           <h1 class="masthead">Project<em>Artillery</em></h1>
           <div class="rail-meta">
             <div>DOC. <b>PA-2050/ORD</b></div>
@@ -392,119 +545,41 @@ export class UI {
         </aside>
         <main class="doc-body">
           <nav class="folder-tabs">
-            <button class="ftab active" data-tab="local">§1 · Local Range</button>
-            <button class="ftab" data-tab="online">§2 · Online Play</button>
+            <button class="ftab back" id="s-back">◂ Main menu</button>
+            <button class="ftab active">${title}</button>
           </nav>
-          <div class="sheet" id="local">
+          <div class="sheet" id="${id}">
             <div class="sheet-head">
-              <h2>Range Configuration</h2>
-              <span class="hint">Host sets the rules</span>
+              <h2>${title}</h2>
+              <span class="hint">${hint}</span>
             </div>
-            ${bank("roster", "Roster", [
-              { value: "1v1ai", label: "1 Bot" },
-              { value: "1v2ai", label: "2 Bots" },
-              { value: "1v3ai", label: "3 Bots" },
-              { value: "2p", label: "2P Seat" },
-              { value: "3p", label: "3P Seat" },
-              { value: "4p", label: "4P Seat" },
-            ], "1v1ai")}
-            ${this.controlSurface("local")}
-            <button class="btn fire-key" id="s-start">Commence Fire ▸</button>
-          </div>
-          <div class="sheet" id="online" style="display:none">
-            <div class="sheet-head">
-              <h2>Online Play</h2>
-              <span class="hint">Play with friends · up to 8</span>
-            </div>
-
-            <div class="field">
-              <span class="label">Your name</span>
-              <input type="text" id="o-name" maxlength="14" value="${savedName}" />
-            </div>
-
-            <!-- Step 1: one clear choice, nothing else on screen yet. -->
-            <div class="choice" id="o-choice">
-              <button type="button" class="choice-card" data-flow="host">
-                <span class="ch-num">1</span>
-                <span class="ch-title">Host a game</span>
-                <span class="ch-desc">Set the rules and get a room code to share with your friends.</span>
-                <span class="ch-go">Choose ▸</span>
-              </button>
-              <button type="button" class="choice-card" data-flow="join">
-                <span class="ch-num">2</span>
-                <span class="ch-title">Join a game</span>
-                <span class="ch-desc">Already have a room code from a friend? Enter it here.</span>
-                <span class="ch-go">Choose ▸</span>
-              </button>
-            </div>
-
-            <!-- Step 2a: join -->
-            <div class="flow" id="o-flow-join" style="display:none">
-              <button type="button" class="backlink" data-back>◂ Back</button>
-              <h3 class="flow-title">Join a game</h3>
-              <p class="flow-help">Pick an open game below, or enter a code if a friend
-                is hosting privately.</p>
-              <div class="list-head">
-                <span class="label">Open games</span>
-                <button type="button" class="btn small" id="o-refresh">Refresh</button>
-              </div>
-              <div class="roomlist" id="o-rooms"></div>
-              <div class="section-break"><span>or join with a code</span></div>
-              <div class="field">
-                <span class="label">Room code</span>
-                <input type="text" id="o-code" maxlength="14" placeholder="e.g. A4VRp30s2" />
-              </div>
-              <button class="btn fire-key" id="o-join">Join with code ▸</button>
-            </div>
-
-            <!-- Step 2b: host -->
-            <div class="flow" id="o-flow-host" style="display:none">
-              <button type="button" class="backlink" data-back>◂ Back</button>
-              <h3 class="flow-title">Host a game</h3>
-              <p class="flow-help">Pick your rules, then share the room code with your
-                friends. You can still change your tank in the lobby.</p>
-              ${bank("visibility", "Who can join", [
-                { value: "public", label: "Anyone (listed)" },
-                { value: "private", label: "Code only" },
-              ], "public")}
-              ${this.controlSurface("online")}
-              <button class="btn fire-key" id="o-create">Create room ▸</button>
-            </div>
-
-            <div class="net-status" id="o-status"></div>
-
-            <!-- Connection details, hidden unless something is wrong or asked for. -->
-            <details class="conn" id="o-conn">
-              <summary>Connection settings</summary>
-              <div class="field" style="margin-top:10px">
-                <span class="label">Server</span>
-                <input type="text" id="o-server" placeholder="your-service.onrender.com" value="${savedServer}" />
-              </div>
-              <div class="note" id="o-serverhint"></div>
-            </details>
+            ${body}
           </div>
         </main>
       </div>`;
+  }
 
-    const localPane = this.menu.querySelector<HTMLElement>("#local")!;
-    const onlinePane = this.menu.querySelector<HTMLElement>("#online")!;
+  private showLocalSetup(): void {
+    this.titleScene?.stop();
+    this.menu.innerHTML = this.setupShell("local", "Local Game", "Hot-seat or vs bots", `
+      ${bank("roster", "Players", [
+        { value: "1v1ai", label: "1 Bot" },
+        { value: "1v2ai", label: "2 Bots" },
+        { value: "1v3ai", label: "3 Bots" },
+        { value: "2p", label: "2P Seat" },
+        { value: "3p", label: "3P Seat" },
+        { value: "4p", label: "4P Seat" },
+      ], "1v1ai")}
+      ${this.configSurface("local")}
+      <button class="btn fire-key" id="s-start">Commence Fire ▸</button>`);
 
-    this.menu.querySelectorAll<HTMLButtonElement>(".ftab").forEach((btn) => {
-      btn.onclick = () => {
-        sfx.unlock(); sfx.ui();
-        this.menu.querySelectorAll(".ftab").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        localPane.style.display = btn.dataset.tab === "local" ? "" : "none";
-        onlinePane.style.display = btn.dataset.tab === "online" ? "" : "none";
-      };
-    });
-
-    this.wireBanks(localPane);
-    this.wireBanks(onlinePane);
+    const pane = this.menu.querySelector<HTMLElement>("#local")!;
+    this.wireBanks(pane);
+    this.wireSetupChrome(pane);
 
     this.menu.querySelector<HTMLButtonElement>("#s-start")!.onclick = () => {
       sfx.unlock(); sfx.ui();
-      const roster = localPane.querySelector<HTMLElement>('[data-bank="roster"]')!.dataset.value!;
+      const roster = pane.querySelector<HTMLElement>('[data-bank="roster"]')!.dataset.value!;
       const players: MatchSettings["players"] = [{ name: "Player 1", isAI: false }];
       if (roster === "1v1ai") players.push({ name: "Vector", isAI: true });
       else if (roster === "1v2ai") players.push({ name: "Vector", isAI: true }, { name: "Torque", isAI: true });
@@ -513,8 +588,7 @@ export class UI {
         const humans = parseInt(roster, 10);
         for (let i = 2; i <= humans; i++) players.push({ name: `Player ${i}`, isAI: false });
       }
-      const settings = this.readSettings(localPane, players);
-      // Each human picks a chassis in turn before the match opens.
+      const settings = this.readSettings(pane, players);
       const humans = players.filter((p) => !p.isAI);
       const runPick = (i: number): void => {
         if (i >= humans.length) {
@@ -531,8 +605,80 @@ export class UI {
       };
       runPick(0);
     };
+  }
 
-    // Step 1 → step 2 navigation.
+  private showOnlineSetup(): void {
+    this.titleScene?.stop();
+    const savedName = localStorage.getItem("pa-name") ?? `Gunner-${Math.floor(Math.random() * 900 + 100)}`;
+    const savedServer = storedServerUrl();
+
+    this.menu.innerHTML = this.setupShell("online", "Online Game", "Play with friends · up to 8", `
+      <div class="field">
+        <span class="label">Your name</span>
+        <input type="text" id="o-name" maxlength="14" value="${savedName}" />
+      </div>
+
+      <div class="choice" id="o-choice">
+        <button type="button" class="choice-card" data-flow="host">
+          <span class="ch-num">1</span>
+          <span class="ch-title">Host a game</span>
+          <span class="ch-desc">Set the rules and get a room code to share with your friends.</span>
+          <span class="ch-go">Choose ▸</span>
+        </button>
+        <button type="button" class="choice-card" data-flow="join">
+          <span class="ch-num">2</span>
+          <span class="ch-title">Join a game</span>
+          <span class="ch-desc">Pick an open game, or enter a code from a friend.</span>
+          <span class="ch-go">Choose ▸</span>
+        </button>
+      </div>
+
+      <div class="flow" id="o-flow-join" style="display:none">
+        <button type="button" class="backlink" data-back>◂ Back</button>
+        <h3 class="flow-title">Join a game</h3>
+        <p class="flow-help">Pick an open game below, or enter a code if a friend
+          is hosting privately.</p>
+        <div class="list-head">
+          <span class="label">Open games</span>
+          <button type="button" class="btn small" id="o-refresh">Refresh</button>
+        </div>
+        <div class="roomlist" id="o-rooms"></div>
+        <div class="section-break"><span>or join with a code</span></div>
+        <div class="field">
+          <span class="label">Room code</span>
+          <input type="text" id="o-code" maxlength="14" placeholder="e.g. A4VRp30s2" />
+        </div>
+        <button class="btn fire-key" id="o-join">Join with code ▸</button>
+      </div>
+
+      <div class="flow" id="o-flow-host" style="display:none">
+        <button type="button" class="backlink" data-back>◂ Back</button>
+        <h3 class="flow-title">Host a game</h3>
+        <p class="flow-help">Pick your rules, then share the room code with your
+          friends. Everyone chooses their tank once the match starts.</p>
+        ${bank("visibility", "Who can join", [
+          { value: "public", label: "Anyone (listed)" },
+          { value: "private", label: "Code only" },
+        ], "public")}
+        ${this.configSurface("online")}
+        <button class="btn fire-key" id="o-create">Create room ▸</button>
+      </div>
+
+      <div class="net-status" id="o-status"></div>
+
+      <details class="conn" id="o-conn">
+        <summary>Connection settings</summary>
+        <div class="field" style="margin-top:10px">
+          <span class="label">Server</span>
+          <input type="text" id="o-server" placeholder="your-service.onrender.com" value="${savedServer}" />
+        </div>
+        <div class="note" id="o-serverhint"></div>
+      </details>`);
+
+    const pane = this.menu.querySelector<HTMLElement>("#online")!;
+    this.wireBanks(pane);
+    this.wireSetupChrome(pane);
+
     const choice = this.menu.querySelector<HTMLElement>("#o-choice")!;
     const flowHost = this.menu.querySelector<HTMLElement>("#o-flow-host")!;
     const flowJoin = this.menu.querySelector<HTMLElement>("#o-flow-join")!;
@@ -546,19 +692,15 @@ export class UI {
         this.menu.querySelector<HTMLInputElement>("#o-code")?.focus();
       }
     };
-    this.menu.querySelector<HTMLButtonElement>("#o-refresh")!.onclick = () => {
-      sfx.ui();
-      void this.refreshRooms();
-    };
     choice.querySelectorAll<HTMLButtonElement>(".choice-card").forEach((btn) => {
-      btn.onclick = () => {
-        sfx.unlock(); sfx.ui();
-        showFlow(btn.dataset.flow as "host" | "join");
-      };
+      btn.onclick = () => { sfx.unlock(); sfx.ui(); showFlow(btn.dataset.flow as "host" | "join"); };
     });
     this.menu.querySelectorAll<HTMLButtonElement>("[data-back]").forEach((b) => {
       b.onclick = () => { sfx.ui(); showFlow("none"); };
     });
+    this.menu.querySelector<HTMLButtonElement>("#o-refresh")!.onclick = () => {
+      sfx.ui(); void this.refreshRooms();
+    };
 
     const serverInput = this.menu.querySelector<HTMLInputElement>("#o-server")!;
     const serverHint = this.menu.querySelector<HTMLElement>("#o-serverhint")!;
@@ -568,14 +710,12 @@ export class UI {
       if (url) {
         serverHint.textContent = `Connecting to ${url}`;
       } else {
-        // Nothing configured — surface it instead of letting a join hang.
         serverHint.textContent = "No server set. Enter your server address above to play online.";
         conn.open = true;
       }
     };
     serverInput.onchange = () => {
-      const normalized = setStoredServerUrl(serverInput.value);
-      serverInput.value = normalized;
+      serverInput.value = setStoredServerUrl(serverInput.value);
       refreshHint();
     };
     refreshHint();
@@ -589,7 +729,7 @@ export class UI {
     this.menu.querySelector<HTMLButtonElement>("#o-create")!.onclick = () => {
       sfx.unlock(); sfx.ui();
       this.netStatus("Creating your room…");
-      this.cb.onCreateRoom(nameOf(), this.readSettings(onlinePane, []));
+      this.cb.onCreateRoom(nameOf(), this.readSettings(pane, []));
     };
     const doJoin = (): void => {
       sfx.unlock(); sfx.ui();
@@ -599,10 +739,21 @@ export class UI {
       this.cb.onJoinRoom(nameOf(), code);
     };
     this.menu.querySelector<HTMLButtonElement>("#o-join")!.onclick = doJoin;
-    // Enter submits, which is what anyone pasting a code expects.
     this.menu.querySelector<HTMLInputElement>("#o-code")!.onkeydown = (e) => {
       if (e.key === "Enter") { e.preventDefault(); doJoin(); }
     };
+  }
+
+  /** Back button + modal triggers shared by both setup screens. */
+  private wireSetupChrome(pane: HTMLElement): void {
+    this.menu.querySelector<HTMLButtonElement>("#s-back")!.onclick = () => {
+      sfx.ui();
+      this.showMenu();
+    };
+    pane.querySelectorAll<HTMLButtonElement>("[data-modal]").forEach((btn) => {
+      btn.onclick = () => { sfx.ui(); this.openModal(pane, btn.dataset.modal!); };
+    });
+    this.refreshSummaries(pane);
   }
 
   // ---------- Tank selector ----------
@@ -667,6 +818,7 @@ export class UI {
       </div>`;
 
     host.appendChild(overlay);
+    this.selectOverlay = overlay;
 
     const canvas = overlay.querySelector<HTMLCanvasElement>("#ts-preview")!;
     const pctx = canvas.getContext("2d")!;
@@ -730,6 +882,7 @@ export class UI {
     overlay.querySelector<HTMLButtonElement>("#ts-confirm")!.onclick = () => {
       sfx.ui();
       overlay.remove();
+      this.selectOverlay = null;
       onDone(pick);
     };
 
@@ -811,20 +964,11 @@ export class UI {
           ${view.iAmHost
             ? `<button class="btn fire-key" id="l-start" style="margin-top:0" ${allReady ? "" : "disabled"}>Launch Operation ▸</button>`
             : `<button class="btn" id="l-ready">${me?.ready ? "Stand Down" : "Ready Up"}</button>`}
-          <button class="btn small" id="l-tank">Chassis</button>
           <button class="btn small" id="l-leave">Withdraw</button>
         </div>
         <div class="net-status"></div>
       </div>`;
     overlay.querySelector<HTMLButtonElement>("#l-leave")!.onclick = () => { sfx.ui(); this.cb.onLeaveRoom(); };
-    overlay.querySelector<HTMLButtonElement>("#l-tank")!.onclick = () => {
-      sfx.ui();
-      const current = me?.loadout ?? this.loadStoredLoadout(0);
-      this.showTankSelect("Select chassis", current, (l) => {
-        this.storeLoadout(0, l);
-        this.cb.onLoadout(l);
-      });
-    };
     overlay.querySelector<HTMLButtonElement>("#l-ready")?.addEventListener("click", () => { sfx.ui(); this.cb.onReadyToggle(); });
     overlay.querySelector<HTMLButtonElement>("#l-start")?.addEventListener("click", () => { sfx.ui(); this.cb.onStartOnline(); });
     this.hud.appendChild(overlay);
@@ -834,6 +978,40 @@ export class UI {
   closeLobby(): void {
     this.lobbyOverlay?.remove();
     this.lobbyOverlay = null;
+  }
+
+  /** Shown after you confirm your chassis, while other seats are still picking. */
+  showWaitingForPlayers(state: { picked: number; total: number; names: string[] }): void {
+    this.closeWaiting();
+    const overlay = document.createElement("div");
+    overlay.className = "overlay blur";
+    overlay.innerHTML = `
+      <div class="panel modal">
+        <div class="subtitle" style="margin:0 0 4px">Deployment</div>
+        <h2>Waiting for players</h2>
+        <div class="subtitle" data-wait-count></div>
+        <div class="waitlist" data-wait-names></div>
+      </div>`;
+    this.hud.appendChild(overlay);
+    this.waitOverlay = overlay;
+    this.updateWaitingForPlayers(state);
+  }
+
+  updateWaitingForPlayers(state: { picked: number; total: number; names: string[] }): void {
+    const el = this.waitOverlay;
+    if (!el) return;
+    el.querySelector<HTMLElement>("[data-wait-count]")!.textContent =
+      `${state.picked} of ${state.total} ready`;
+    const names = el.querySelector<HTMLElement>("[data-wait-names]")!;
+    names.innerHTML = state.names.length === 0
+      ? `<div class="room-empty">Everyone is in — starting…</div>`
+      : state.names.map((n) => `<div class="score-row"><span class="sname">${n}</span>
+          <span class="sval">choosing…</span></div>`).join("");
+  }
+
+  closeWaiting(): void {
+    this.waitOverlay?.remove();
+    this.waitOverlay = null;
   }
 
   // ---------- In-game HUD ----------
@@ -848,9 +1026,12 @@ export class UI {
         <span class="turn-name" id="t-name">—</span>
         <span class="timer" id="t-timer">30</span>
         <span class="wind" id="t-wind">
-          <span>WIND</span>
-          <span class="arrow">·</span>
-          <span class="bars"><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="wind-label">Wind</span>
+          <span class="wind-arrow" id="t-wind-arrow">–</span>
+          <span class="wind-read">
+            <span class="wind-num" id="t-wind-num">0</span>
+            <span class="wind-meter"><i id="t-wind-fill"></i></span>
+          </span>
         </span>
         <span class="mode-info" id="t-mode"></span>
       </div>
@@ -905,7 +1086,9 @@ export class UI {
       const isBanned = bannedSet.has(i);
       slot.className = `weapon-slot${isBanned ? " banned" : ""}`;
       const key = i < 10 ? `${(i + 1) % 10}` : "";
-      slot.innerHTML = `<span class="key">${key}</span><span class="tier" style="display:none"></span><span class="icon">${weaponIcon(w.id)}</span>`;
+      slot.innerHTML = `<span class="key">${key}</span><span class="tier" style="display:none"></span>`
+        + `<span class="icon">${weaponIcon(w.id)}</span>`
+        + `<span class="ammo" style="display:none"></span>`;
       slot.title = isBanned ? `${w.name} — BANNED` : `${w.name} — ${w.desc}`;
       if (!isBanned) slot.onclick = () => this.cb.onSelectWeapon(i);
       bar.appendChild(slot);
@@ -918,6 +1101,8 @@ export class UI {
     this.weaponSlots = [];
     this.upgradeOverlay = null;
     this.lobbyOverlay = null;
+    this.pauseOverlay = null;
+    this.waitOverlay = null;
   }
 
   updateTurn(tank: Tank, isMyTurn: boolean): void {
@@ -939,14 +1124,26 @@ export class UI {
     this.timerEl.classList.toggle("low", s <= 5);
   }
 
+  /**
+   * Wind readout: direction arrow, a number you can actually act on, and a
+   * colour-coded strength bar. Speed is normalised against the strongest wind
+   * the game generates so "full bar" always means the same thing.
+   */
   updateWind(wind: number): void {
-    const arrow = this.windEl.querySelector(".arrow")!;
-    arrow.textContent = wind > 2 ? "▶" : wind < -2 ? "◀" : "·";
-    const strength = Math.min(5, Math.round(Math.abs(wind) / 38));
-    this.windEl.querySelectorAll<HTMLElement>(".bars i").forEach((bar, i) => {
-      bar.style.height = `${4 + i * 2}px`;
-      bar.classList.toggle("on", i < strength);
-    });
+    const arrow = this.windEl.querySelector<HTMLElement>("#t-wind-arrow")!;
+    const num = this.windEl.querySelector<HTMLElement>("#t-wind-num")!;
+    const fill = this.windEl.querySelector<HTMLElement>("#t-wind-fill")!;
+
+    const speed = Math.round(Math.abs(wind) / 10);
+    const frac = Math.min(1, Math.abs(wind) / 190);
+
+    arrow.textContent = Math.abs(wind) < 2 ? "•" : wind > 0 ? "→" : "←";
+    arrow.classList.toggle("calm", Math.abs(wind) < 2);
+    num.textContent = String(speed);
+    fill.style.width = `${frac * 100}%`;
+
+    const level = frac < 0.3 ? "low" : frac < 0.62 ? "mid" : "high";
+    this.windEl.dataset.level = level;
   }
 
   updateAim(tank: Tank): void {
@@ -964,6 +1161,14 @@ export class UI {
       const tierEl = slot.querySelector<HTMLElement>(".tier")!;
       tierEl.style.display = tier > 0 ? "" : "none";
       tierEl.textContent = "★".repeat(tier);
+
+      // Remaining rounds, shown only when the host capped ammo.
+      const rounds = tank.ammo[i];
+      const ammoEl = slot.querySelector<HTMLElement>(".ammo")!;
+      const limited = Number.isFinite(rounds);
+      ammoEl.style.display = limited ? "" : "none";
+      if (limited) ammoEl.textContent = `×${rounds}`;
+      slot.classList.toggle("empty", limited && rounds <= 0);
     });
     const def = WEAPONS[tank.selectedWeapon];
     this.weaponNameEl.textContent = def.tiers[tank.weaponTiers[tank.selectedWeapon]].label;
@@ -999,6 +1204,71 @@ export class UI {
     const showing = this.fpsEl.style.display === "none";
     this.fpsEl.style.display = showing ? "" : "none";
     return showing;
+  }
+
+  // ---------- Pause / escape handling ----------
+
+  /**
+   * One place that knows what ESC means right now. Returns true if it handled
+   * the key, so callers can fall through to gameplay when it did not.
+   */
+  escape(): boolean {
+    if (this.pauseOverlay) { this.closePause(); return true; }
+    if (this.selectOverlay) {
+      // Tank selection is required — cancelling would leave no loadout.
+      return true;
+    }
+    if (this.modalOverlay) { this.closeModal(); return true; }
+    if (this.upgradeOverlay) { this.closeUpgradePanel(); return true; }
+    // In a menu flow: step back to the choice screen rather than pausing.
+    const back = this.menu.querySelector<HTMLButtonElement>(
+      "#o-flow-host:not([style*='none']) [data-back], #o-flow-join:not([style*='none']) [data-back]");
+    if (back) { back.click(); return true; }
+    return false;
+  }
+
+  get inMatchUi(): boolean {
+    return this.menu.innerHTML === "" && !!this.hud.querySelector(".bottombar");
+  }
+
+  showPause(info: { mode: string; map: string; online: boolean }): void {
+    if (this.pauseOverlay) return;
+    const overlay = document.createElement("div");
+    overlay.className = "overlay blur";
+    overlay.innerHTML = `
+      <div class="panel modal">
+        <div class="subtitle" style="margin:0 0 4px">Match paused</div>
+        <h2>Paused</h2>
+        <div class="subtitle">${info.mode} · ${info.map}${info.online ? " · online" : ""}</div>
+        <div class="pause-note">${info.online
+          ? "The match clock keeps running for other players while you are here."
+          : "Nothing moves until you resume."}</div>
+        <button class="btn fire-key" id="p-resume">Resume ▸</button>
+        <div class="row-buttons" style="margin-top:10px">
+          <button class="btn" id="p-quit">Quit to menu</button>
+        </div>
+      </div>`;
+    overlay.querySelector<HTMLButtonElement>("#p-resume")!.onclick = () => { sfx.ui(); this.closePause(); };
+    overlay.querySelector<HTMLButtonElement>("#p-quit")!.onclick = () => {
+      sfx.ui();
+      this.closePause();
+      this.cb.onQuitMatch();
+    };
+    // Clicking the dimmed backdrop resumes, like any modal.
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) this.closePause();
+    });
+    this.hud.appendChild(overlay);
+    this.pauseOverlay = overlay;
+  }
+
+  closePause(): void {
+    this.pauseOverlay?.remove();
+    this.pauseOverlay = null;
+  }
+
+  get paused(): boolean {
+    return this.pauseOverlay !== null;
   }
 
   // ---------- Cinematic overlay ----------

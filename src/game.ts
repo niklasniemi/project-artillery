@@ -1,5 +1,5 @@
 import { Terrain } from "./terrain";
-import { Tank, Projectile, Crate, CrateKind, TANK_RADIUS } from "./entities";
+import { Tank, Projectile, Crate, CrateKind, Shield, TANK_RADIUS } from "./entities";
 import { Loadout, TankPalette, drawChassis } from "./tanks";
 import { Particles, ScreenShake } from "./particles";
 import { WEAPONS, levelForXp } from "./weapons";
@@ -51,9 +51,14 @@ export interface Snapshot {
     seat: number; x: number; y: number;
     hp: number; maxHp: number; fuel: number; alive: boolean;
     xp: number; level: number; up: number; tiers: number[];
-    kills: number; dmg: number; turns: number;
+    kills: number; dmg: number; turns: number; ammo: number[];
   }[];
   crates: { kind: CrateKind; x: number; y: number; landed: boolean; collected: boolean }[];
+  shields: {
+    x: number; y: number; r: number;
+    seat: number; team: number; color: string;
+    hits: number; turns: number;
+  }[];
 }
 
 export interface TurnEndMsg {
@@ -129,6 +134,9 @@ interface Cinematic {
 const INTRO_PER_TANK = 0.85;
 const INTRO_OUTRO = 0.7;
 
+/** Hull points restored by a health crate, however it is claimed. */
+const CRATE_HEAL = 35;
+
 const FIRE_VOICES: Record<string, FireVoice> = {
   mortar: "heavy", nuke: "heavy", quake: "heavy",
   sniper: "energy", railstrike: "energy",
@@ -143,6 +151,7 @@ export class Game {
   private pendingSpawns: PendingSpawn[] = [];
   private beams: Beam[] = [];
   private crates: Crate[] = [];
+  private shields: Shield[] = [];
   private particles = new Particles();
   private shake = new ScreenShake();
   private bg: HTMLCanvasElement;
@@ -227,9 +236,25 @@ export class Game {
     return this.banned.has(index);
   }
 
-  private firstAllowedWeapon(): number {
-    for (let i = 0; i < WEAPONS.length; i++) if (!this.banned.has(i)) return i;
+  private firstAllowedWeapon(tank?: Tank): number {
+    for (let i = 0; i < WEAPONS.length; i++) {
+      if (this.banned.has(i)) continue;
+      if (tank && !tank.hasAmmo(i)) continue;
+      return i;
+    }
     return 0;
+  }
+
+  /** Bans plus anything this tank is out of — what the AI must avoid. */
+  private unusableFor(tank: Tank): Set<number> {
+    const out = new Set(this.banned);
+    for (let i = 0; i < WEAPONS.length; i++) if (!tank.hasAmmo(i)) out.add(i);
+    return out;
+  }
+
+  /** Selectable = not banned and still has rounds. */
+  private isUsable(tank: Tank, index: number): boolean {
+    return !this.banned.has(index) && tank.hasAmmo(index);
   }
 
   // ---------- Match lifecycle ----------
@@ -250,6 +275,7 @@ export class Game {
     this.pendingSpawns = [];
     this.beams = [];
     this.crates = [];
+    this.shields = [];
     this.tanks = [];
     this.awaitingAdvance = false;
     this.shot = null;
@@ -311,6 +337,15 @@ export class Game {
       jug.maxHp *= 3;
       jug.hp = jug.maxHp;
       for (const t of this.tanks) t.team = t === jug ? 1 : 0;
+    }
+
+    // Ammo limits. The basic Shell always stays unlimited so a tank can never
+    // be left with nothing to fire and stall the turn order.
+    const limit = settings.ammoLimit ?? 0;
+    const shellIndex = WEAPONS.findIndex((w) => w.id === "shell");
+    for (const t of this.tanks) {
+      t.ammo = WEAPONS.map((_, i) =>
+        limit <= 0 || i === shellIndex ? Infinity : limit);
     }
 
     const firstAllowed = this.firstAllowedWeapon();
@@ -592,8 +627,14 @@ export class Game {
 
     if (!t.alive && this.settings.mode === "points") this.respawn(t);
 
-    if (this.banned.has(t.selectedWeapon)) t.selectedWeapon = this.firstAllowedWeapon();
+    if (!this.isUsable(t, t.selectedWeapon)) t.selectedWeapon = this.firstAllowedWeapon(t);
     t.turnsTaken++;
+
+    // Domes weather one round each time their owner comes back around.
+    for (const s of this.shields) {
+      if (s.ownerSeat === t.seat) s.turnsLeft--;
+    }
+    this.shields = this.shields.filter((s) => !s.dead);
     this.rollWind();
     this.maybeDropCrate();
     this.turnTimeLeft = this.settings.turnSeconds;
@@ -669,8 +710,10 @@ export class Game {
     if (!this.settings.crates) return;
     const roll = this.rng();
     if (this.crates.filter((c) => !c.collected).length >= 3) return;
-    if (roll > 0.28) return;
-    const kind = rngPick<CrateKind>(this.rng, ["health", "fuel", "xp"]);
+    if (roll > 0.34) return;
+    // Health is the headline drop, so it is weighted above the utility crates.
+    const kind = rngPick<CrateKind>(this.rng,
+      ["health", "health", "health", "fuel", "xp"]);
     this.crates.push(new Crate(kind, rngRange(this.rng, 60, WORLD_W - 60)));
   }
 
@@ -683,6 +726,14 @@ export class Game {
       const msg: FireMsg = { x: t.x, y: t.y, angle: t.angle, power: t.power, weapon: t.selectedWeapon };
       this.online.send("fire", msg);
     }
+    // Out of rounds? Fall back to the always-stocked Shell rather than
+    // silently doing nothing and hanging the turn.
+    if (!t.hasAmmo(t.selectedWeapon)) {
+      t.selectedWeapon = this.firstAllowedWeapon(t);
+      this.ui.updateWeapons(t);
+    }
+    if (Number.isFinite(t.ammo[t.selectedWeapon])) t.ammo[t.selectedWeapon] -= 1;
+
     const def = t.weaponDef;
     const stats = t.weaponStats;
     const tip = t.barrelTip;
@@ -778,17 +829,45 @@ export class Game {
     this.shake.add(0.4);
   }
 
+  /**
+   * SPACE during flight is the "do the thing" key: it splits a Splitter and
+   * anchors a Shielder dome wherever the shot currently is.
+   */
   private requestSplit(): void {
     if (this.online && !this.isMyTurn()) return;
     for (const p of this.projectiles) {
-      if (p.alive && p.def.behavior === "splitter" && !p.hasSplit) {
+      if (!p.alive) continue;
+      if (p.def.behavior === "splitter" && !p.hasSplit) {
         if (this.online) {
           const msg: SplitMsg = { x: p.x, y: p.y, vx: p.vx, vy: p.vy };
           this.online.send("split", msg);
         }
         p.splitRequested = true;
+      } else if (p.def.behavior === "shielder") {
+        if (this.online) {
+          const msg: SplitMsg = { x: p.x, y: p.y, vx: p.vx, vy: p.vy };
+          this.online.send("deploy", msg);
+        }
+        this.deployShield(p);
       }
     }
+  }
+
+  /** Remote peer anchored their dome mid-flight. */
+  remoteDeploy(seat: number, msg: SplitMsg): void {
+    const t = this.tanks.find((tk) => tk.seat === seat);
+    if (!t) return;
+    const p = this.projectiles.find((pr) => pr.alive && pr.def.behavior === "shielder");
+    if (p) {
+      p.x = msg.x; p.y = msg.y;
+      this.deployShield(p);
+      return;
+    }
+    // Our sim already resolved the shot — place the dome from the report.
+    this.shields.push(new Shield(
+      msg.x, msg.y, t.weaponStats.radius * t.attrs.blast,
+      t.seat, t.team, t.palette.glow, 3, 3,
+    ));
   }
 
   private split(p: Projectile): void {
@@ -855,10 +934,10 @@ export class Game {
       this.particles.burst(owner.x, owner.y - 10, 12, 120, ["#6bff7e", "#b6ff4d"], 0.7, 3, -60);
     }
 
+    // Shooting a crate claims it for the shooter rather than wasting it.
     for (const crate of this.crates) {
       if (!crate.collected && dist(x, y, crate.x, crate.y) < radius + 12) {
-        crate.collected = true;
-        this.particles.sparks(crate.x, crate.y, 12);
+        this.applyCrate(owner, crate, true);
       }
     }
     return enemyDamage;
@@ -870,10 +949,7 @@ export class Game {
     const behavior = p.def.behavior;
 
     if (behavior === "shielder") {
-      this.terrain.addDome(p.x, p.y, stats.radius);
-      this.particles.sparks(p.x, p.y, 24);
-      sfx.bounce();
-      this.shake.add(0.1);
+      this.deployShield(p);
       return;
     }
 
@@ -978,6 +1054,53 @@ export class Game {
       splashMul: behavior === "sniper" ? 0.4 : 1,
       healFrac: behavior === "leech" ? 0.55 : 0,
     });
+  }
+
+  /** Anchors a dome at the projectile's position and consumes the shot. */
+  private deployShield(p: Projectile): void {
+    p.alive = false;
+    const owner = p.owner;
+    const tier = owner.weaponTiers[owner.selectedWeapon] ?? 0;
+    this.shields.push(new Shield(
+      p.x, p.y, p.stats.radius * owner.attrs.blast,
+      owner.seat, owner.team, owner.palette.glow,
+      3 + tier, 3,
+    ));
+    this.particles.ring(p.x, p.y, p.stats.radius * 2.2, 0.5, "rgba(120,235,255,0.9)", 3);
+    this.particles.burst(p.x, p.y, 22, 150, ["#78ebff", "#ffffff"], 0.7, 3, -40, 2);
+    sfx.bounce();
+    this.shake.add(0.14);
+  }
+
+  /**
+   * One-way blocking. A shot crossing a dome from outside inward is stopped;
+   * crossing outward — i.e. fired from within — passes freely. Using the
+   * crossing direction rather than a proximity test also means fast shells
+   * cannot tunnel through the shell wall.
+   */
+  private blockedByShield(p: Projectile, prevX: number, prevY: number): boolean {
+    for (const s of this.shields) {
+      if (s.dead) continue;
+      const wasInside = s.coversPoint(prevX, prevY);
+      const nowInside = s.coversPoint(p.x, p.y);
+      if (wasInside || !nowInside) continue;     // outgoing or unrelated
+      if (p.owner.seat === s.ownerSeat) continue; // never blocked by your own dome
+      if (s.team >= 0 && p.owner.team === s.team) continue; // teammates pass
+      s.hits--;
+      s.flash = 0.6;
+      this.particles.ring(p.x, p.y, 70, 0.4, "rgba(150,240,255,0.95)", 3);
+      this.particles.burst(p.x, p.y, 16, 190, ["#9df0ff", "#ffffff"], 0.5, 3, 60, 2);
+      sfx.bounce();
+      this.shake.add(0.2);
+      if (s.hits <= 0) {
+        this.particles.burst(s.x, s.y - s.radius * 0.4, 30, 260, ["#78ebff", "#ffffff"], 1, 3.5, 120, 2);
+        sfx.explosion(0.4);
+      }
+      // Detonate against the outside of the dome.
+      this.explode(p, null);
+      return true;
+    }
+    return false;
   }
 
   private applyDamage(tank: Tank, rawDmg: number, source: Tank): void {
@@ -1109,19 +1232,20 @@ export class Game {
   selectWeapon(index: number): void {
     if (this.phase !== "input" || !this.isMyTurn()) return;
     const i = clamp(index, 0, WEAPONS.length - 1);
-    if (this.banned.has(i)) return;
+    if (!this.isUsable(this.currentTank, i)) return;
     this.currentTank.selectedWeapon = i;
     sfx.ui();
     this.ui.updateWeapons(this.currentTank);
   }
 
-  /** Wheel/keyboard cycling skips banned ordnance entirely. */
+  /** Cycling skips banned ordnance and anything you are out of. */
   cycleWeapon(dir: 1 | -1): void {
     if (this.phase !== "input" || !this.isMyTurn()) return;
-    let i = this.currentTank.selectedWeapon;
+    const t = this.currentTank;
+    let i = t.selectedWeapon;
     for (let n = 0; n < WEAPONS.length; n++) {
       i = (i + dir + WEAPONS.length) % WEAPONS.length;
-      if (!this.banned.has(i)) break;
+      if (this.isUsable(t, i)) break;
     }
     this.selectWeapon(i);
   }
@@ -1209,8 +1333,15 @@ export class Game {
         hp: t.hp, maxHp: t.maxHp, fuel: t.fuel, alive: t.alive,
         xp: t.xp, level: t.level, up: t.upgradePoints, tiers: [...t.weaponTiers],
         kills: t.kills, dmg: t.damageDealt, turns: t.turnsTaken,
+        // Infinity does not survive JSON — send -1 and restore on the way in.
+        ammo: t.ammo.map((a) => (Number.isFinite(a) ? a : -1)),
       })),
       crates: this.crates.map((c) => ({ kind: c.kind, x: c.x, y: c.y, landed: c.landed, collected: c.collected })),
+      shields: this.shields.map((s) => ({
+        x: s.x, y: s.y, r: s.radius,
+        seat: s.ownerSeat, team: s.team, color: s.color,
+        hits: s.hits, turns: s.turnsLeft,
+      })),
     };
   }
 
@@ -1224,6 +1355,7 @@ export class Game {
       t.xp = ts.xp; t.level = ts.level; t.upgradePoints = ts.up;
       t.weaponTiers = [...ts.tiers];
       t.kills = ts.kills; t.damageDealt = ts.dmg; t.turnsTaken = ts.turns;
+      if (ts.ammo) t.ammo = ts.ammo.map((a) => (a < 0 ? Infinity : a));
     }
     this.crates = s.crates.map((cs) => {
       const c = new Crate(cs.kind, cs.x, cs.y);
@@ -1231,6 +1363,8 @@ export class Game {
       c.collected = cs.collected;
       return c;
     });
+    this.shields = (s.shields ?? []).map((ss) =>
+      new Shield(ss.x, ss.y, ss.r, ss.seat, ss.team, ss.color, ss.hits, ss.turns));
   }
 
   // ---------- Input ----------
@@ -1241,7 +1375,21 @@ export class Game {
       this.keys.add(e.key.toLowerCase());
       if (e.key === "F3") { e.preventDefault(); this.ui.toggleFps(); return; }
       if (e.key.toLowerCase() === "m") sfx.toggleMute();
-      if (e.key === "Escape" && this.phase === "cinematic") { this.skipCinematic(); return; }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (this.phase === "cinematic") { this.skipCinematic(); return; }
+        // Let the UI claim it first (close a modal, step back a menu), then
+        // fall through to the pause menu when we are actually in a match.
+        if (this.ui.escape()) return;
+        if (this.phase !== "idle" && this.phase !== "gameover" && this.ui.inMatchUi) {
+          this.ui.showPause({
+            mode: this.settings.mode,
+            map: this.theme.name,
+            online: !!this.online,
+          });
+        }
+        return;
+      }
       if (e.key === " ") {
         e.preventDefault();
         if (this.phase === "cinematic") this.skipCinematic();
@@ -1392,6 +1540,10 @@ export class Game {
       return;
     }
 
+    // A local pause genuinely stops the world. Online it cannot — the server
+    // and other players keep going — so there we only show the menu.
+    if (this.ui.paused && !this.online && !catchUp) return;
+
     // Cinematics own the clock while they run: no simulation, only camera,
     // particles and shake. catchUp fast-forwards straight past them.
     if (this.phase === "cinematic") {
@@ -1413,6 +1565,7 @@ export class Game {
     this.particles.update(dt);
     this.shake.update(dt);
     this.updateWeather(dt);
+    for (const s of this.shields) s.flash = Math.max(0, s.flash - dt * 2.2);
     this.flushNet(dt);
     for (const b of this.beams) b.life -= dt;
     this.beams = this.beams.filter((b) => b.life > 0);
@@ -1471,7 +1624,7 @@ export class Game {
       // Phase 1 — reposition. Chosen once, then driven toward so the move is
       // visible rather than teleporting.
       if (this.aiMoveTarget === null) {
-        this.aiMoveTarget = planMove(t, this.tanks, this.terrain, this.wind, this.banned);
+        this.aiMoveTarget = planMove(t, this.tanks, this.terrain, this.wind, this.unusableFor(t));
       }
       if (this.aiTimer < 1.25 && Math.abs(t.x - this.aiMoveTarget) > 4) {
         t.drive(t.x < this.aiMoveTarget ? 1 : -1, this.terrain, dt);
@@ -1480,7 +1633,7 @@ export class Game {
 
       // Phase 2 — solve and swing onto the firing solution.
       if (!this.aiPlan) {
-        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.banned);
+        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.unusableFor(t));
         t.selectedWeapon = this.aiPlan.weaponIndex;
         this.ui.updateWeapons(t);
         this.aiAimFrom = this.aiTimer;
@@ -1643,6 +1796,7 @@ export class Game {
       if (p.age > 5) { this.explode(p, null); return; }
     }
 
+    const prevX = p.x, prevY = p.y;
     p.vx += this.wind * p.def.windMul * p.owner.attrs.wind * h;
     p.vy += physics.gravity * p.def.gravityMul * h;
     p.x += p.vx * h;
@@ -1652,6 +1806,8 @@ export class Game {
       p.alive = false;
       return;
     }
+
+    if (this.blockedByShield(p, prevX, prevY)) return;
 
     const hitTank = this.findTankHit(p);
     if (hitTank) {
@@ -1791,13 +1947,22 @@ export class Game {
     }
   }
 
-  private applyCrate(tank: Tank, crate: Crate): void {
+  private applyCrate(tank: Tank, crate: Crate, shotOpen = false): void {
+    if (crate.collected || !tank.alive) return;
     crate.collected = true;
     sfx.pickup();
     this.particles.sparks(crate.x, crate.y, 14);
-    if (crate.kind === "health") tank.hp = Math.min(tank.maxHp, tank.hp + 30);
-    else if (crate.kind === "fuel") tank.fuel = Math.min(tank.maxFuel + 100, tank.fuel + 60);
-    else this.grantXp(tank, 40);
+
+    if (crate.kind === "health") {
+      const heal = Math.min(tank.maxHp - tank.hp, CRATE_HEAL);
+      tank.hp = Math.min(tank.maxHp, tank.hp + CRATE_HEAL);
+      this.particles.burst(crate.x, crate.y, 18, 130, ["#9df04d", "#e8ffd0"], 0.9, 3, -70, 2);
+      if (heal > 0 && !tank.isAI) this.ui.award(shotOpen ? "Supply drop" : "Repaired", heal);
+    } else if (crate.kind === "fuel") {
+      tank.fuel = Math.min(tank.maxFuel + 100, tank.fuel + 60);
+    } else {
+      this.grantXp(tank, 40);
+    }
   }
 
   // ---------- Rendering ----------
@@ -1917,6 +2082,7 @@ export class Game {
     this.drawWeather(ctx);
 
     for (const crate of this.crates) crate.draw(ctx);
+    for (const s of this.shields) s.draw(ctx);
 
     for (let i = 0; i < this.tanks.length; i++) {
       this.tanks[i].draw(ctx, i === this.currentIndex && this.phase === "input");
@@ -2052,11 +2218,12 @@ export class Game {
   }
 
   /**
-   * Trajectory preview: a tapering dotted arc that fades with distance, an
-   * impact reticle where it meets the ground, and a charge gauge at the muzzle.
+   * Launch-vector preview. Deliberately *not* a solution: it is short, and it
+   * ignores wind entirely, so the arc shows where the shell starts out rather
+   * than where it lands. Reading the wind is left to the player.
    */
   private drawAimGuide(ctx: CanvasRenderingContext2D, t: Tank): void {
-    const mode = this.settings.aimGuide ?? "full";
+    const mode = this.settings.aimGuide ?? "short";
     if (mode === "off") return;
 
     const def = t.weaponDef;
@@ -2066,62 +2233,31 @@ export class Game {
     let vx = Math.cos(t.angle) * v;
     let vy = Math.sin(t.angle) * v;
     const dt = 1 / 60;
-    const steps = mode === "short" ? 34 : 150;
+    const steps = { tiny: 10, short: 20, long: 40 }[mode] ?? 20;
 
     ctx.save();
 
-    // Sample the arc, remembering where (if anywhere) it lands.
-    let hit: { x: number; y: number } | null = null;
     const pts: { x: number; y: number }[] = [];
     for (let i = 0; i < steps; i++) {
-      vx += this.wind * def.windMul * t.attrs.wind * dt;
+      // Gravity only — wind is intentionally excluded from the preview.
       vy += physics.gravity * def.gravityMul * dt;
       x += vx * dt;
       y += vy * dt;
-      if (x < -80 || x > WORLD_W + 80) break;
-      if (y > WORLD_H) { hit = { x, y: WORLD_H }; break; }
+      if (x < -80 || x > WORLD_W + 80 || y > WORLD_H) break;
       pts.push({ x, y });
-      if (this.terrain.solid(x, y)) { hit = { x, y }; break; }
+      if (this.terrain.solid(x, y)) break;
     }
 
-    // Dots thin and fade along the flight path.
+    // Dots thin and fade out, so the line reads as "heading" not "landing".
     ctx.fillStyle = t.palette.glow;
-    for (let i = 0; i < pts.length; i += 3) {
+    for (let i = 0; i < pts.length; i += 2) {
       const f = i / Math.max(1, pts.length - 1);
-      ctx.globalAlpha = 0.8 * (1 - f * 0.75);
+      ctx.globalAlpha = 0.85 * (1 - f) * (1 - f);
       ctx.beginPath();
-      ctx.arc(pts[i].x, pts[i].y, 2.6 - f * 1.5, 0, TAU);
+      ctx.arc(pts[i].x, pts[i].y, 2.8 - f * 1.8, 0, TAU);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
-
-    // Impact reticle — only meaningful on the full guide.
-    if (hit && mode === "full") {
-      const pulse = 1 + Math.sin(performance.now() / 180) * 0.12;
-      const rr = 11 * pulse;
-      ctx.strokeStyle = t.palette.glow;
-      ctx.lineWidth = 1.6;
-      ctx.globalAlpha = 0.9;
-      ctx.beginPath();
-      ctx.arc(hit.x, hit.y, rr, 0, TAU);
-      ctx.stroke();
-      ctx.globalAlpha = 0.55;
-      ctx.beginPath();
-      ctx.moveTo(hit.x - rr - 6, hit.y); ctx.lineTo(hit.x - rr + 2, hit.y);
-      ctx.moveTo(hit.x + rr - 2, hit.y); ctx.lineTo(hit.x + rr + 6, hit.y);
-      ctx.moveTo(hit.x, hit.y - rr - 6); ctx.lineTo(hit.x, hit.y - rr + 2);
-      ctx.moveTo(hit.x, hit.y + rr - 2); ctx.lineTo(hit.x, hit.y + rr + 6);
-      ctx.stroke();
-
-      // Blast footprint of the selected round.
-      ctx.globalAlpha = 0.22;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.arc(hit.x, hit.y, t.weaponStats.radius * t.attrs.blast, 0, TAU);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
-    }
 
     // Charge gauge: an arc at the muzzle that fills with power.
     const gaugeR = 30;

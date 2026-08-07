@@ -31,12 +31,23 @@ function ensureNet(): Net {
   if (net) return net;
   net = new Net();
   net.onLobby = (view) => ui.showLobby(view);
+  // Every seat picks a chassis before the match opens, not just the host.
+  net.onSelecting = (state) => {
+    ui.closeLobby();
+    ui.showTankSelect("Select chassis", ui.loadStoredLoadout(0), (l) => {
+      ui.storeLoadout(0, l);
+      net?.send("loadout", l);
+      ui.showWaitingForPlayers(state);
+    });
+  };
+  net.onSelectState = (state) => ui.updateWaitingForPlayers(state);
   net.onStart = (payload: StartPayload) => {
     const settings: MatchSettings = {
       ...payload.settings,
       players: payload.seats.map((s) => ({ name: s.name, isAI: false, loadout: s.loadout })),
     };
     ui.closeLobby();
+    ui.closeWaiting();
     game.start(settings, {
       seed: payload.seed,
       online: {
@@ -49,6 +60,7 @@ function ensureNet(): Net {
   net.onDrive = (seat, x, y, fuel, facing) => game.remoteDrive(seat, x, y, fuel, facing);
   net.onFire = (seat, msg) => game.remoteFire(seat, msg);
   net.onSplit = (seat, msg) => game.remoteSplit(seat, msg);
+  net.onDeploy = (seat, msg) => game.remoteDeploy(seat, msg);
   net.onUpgrade = (seat, weaponIndex) => game.upgradeWeapon(weaponIndex, true, seat);
   net.onCrate = (seat, index) => game.remoteCrate(seat, index);
   net.onAdvance = (nextSeat, snapshot, gameOver) => game.advanceTurn(nextSeat, snapshot, gameOver);
@@ -91,6 +103,12 @@ const ui = new UI({
   onReadyToggle: () => net?.send("ready"),
   onLoadout: (loadout) => net?.send("loadout", loadout),
   onListRooms: () => ensureNet().listRooms(),
+  onQuitMatch: () => {
+    if (net?.connected) net.leave();
+    game.online = null;
+    ui.clearHud();
+    ui.showMenu();
+  },
   onStartOnline: () => net?.send("start"),
   onLeaveRoom: () => {
     net?.leave();

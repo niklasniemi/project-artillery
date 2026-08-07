@@ -4,6 +4,10 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 
 ## Features
 
+- **Animated title screen** with two clean paths — Local Game and Online Game — and match settings collapsed into Theatre / Rules / Armory modals
+- **One-way energy shields** — shots fired from inside pass out freely, incoming enemy fire is stopped; press `SPACE` mid-flight to anchor the dome in mid-air
+- **Ammo limits** — the host can cap rounds per weapon (1/2/3/unlimited); the basic Shell always stays stocked
+- **Supply crates** parachute in between turns; drive over one or shoot it to claim the heal
 - **Six themed theatres** — Nightfall, Dune Sea, Frostbite, Ashlands, Verdant and Orbital, each with its own sky, rock palette, hazard colour and weather, picked from rendered map cards
 - **Six tank chassis** with real trade-offs — Vanguard, Scout, Bulwark, Howitzer, Sapper, Reaver; pick chassis and livery before every match
 - **Cinematics** — a roll-call cutscene introduces every tank at the open, and a kill cam replays the shot that destroyed someone
@@ -99,7 +103,9 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | C | Recentre the camera |
 | M | Mute audio |
 | F3 | Frame-rate / quality readout |
-| Space / Esc / click | Skip a cutscene or kill cam |
+| Space | Fire · split a Splitter · anchor a Shielder dome mid-air |
+| Esc | Pause / quit menu, or step back one level in menus |
+| Space / click | Skip a cutscene or kill cam |
 | U | Open upgrade panel (when you have points) |
 
 ## Roadmap
@@ -108,6 +114,7 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 - **Phase 2 — Multiplayer** ✅ Colyseus lockstep server (Render-ready), room-code lobbies, up to 8 players
 - **Phase 3 — Full arsenal** ✅ all 20 weapons with tier upgrades, Points / Juggernaut / Assassination modes
 - **Phase 4 — AAA polish** ✅ art direction overhaul, VFX pass, layered audio, 60 FPS work, weapon bans, trick-shot XP
+- **Phase 5 — Refit** ✅ animated menu + modal config, one-way shields, ammo limits, wind-free short trajectory, HP crates, bold wind readout, ESC/pause navigation, terrain surface overhaul, online chassis selection for every seat
 - **Next** ⏳ simultaneous-turn mode, spectator view, per-weapon balance pass
 
 ## Art direction
@@ -142,6 +149,23 @@ win rate — inside one standard error of even at that sample size. The AI
 repositions with its fuel before firing, which is what gives the mobile chassis
 their value; without that, mobility stats are worth nothing in a duel.
 
+## Design notes
+
+**Shields are objects, not terrain.** The old dome stamped solid ground, which
+by definition blocks everything. Making shields real entities allows the
+one-way rule, and it is implemented by *crossing direction* rather than
+proximity: a shot moving outside→inside is stopped, inside→outside passes. That
+also makes tunnelling impossible for fast shells, since the test is on the
+segment rather than the current position.
+
+**The trajectory preview is deliberately not a solution.** It is short and it
+ignores wind entirely, so it shows the launch vector rather than the landing
+point — reading the wind is the skill the game is about. Length is configurable
+(off / minimal / short / long) for players who want more or less help.
+
+**Ammo never softlocks a turn.** When the host caps rounds, the basic Shell
+stays unlimited, so a tank can always fire and the turn order can never stall.
+
 ## Rendering notes
 
 Tank art is authored once and cached: hull and barrel rasterize to sprites keyed
@@ -155,6 +179,12 @@ collision radius so the detail is legible — cosmetic only, hitboxes are unchan
 Map themes drive one shared `paintSky` routine, used for both the world
 background and the selector thumbnails, so a map card always looks like the map
 it launches.
+
+Terrain is rasterized from the destructible mask as three soft bands — lit
+crest, topsoil, body — with coverage-based alpha along the silhouette
+(gamma-curved 3×3 tap, interior pixels early-out). That is what removes the hard
+stair-stepped outline; the mask itself remains the untouched physics truth, so
+softening the edge visually never changes a collision.
 
 ## Performance notes
 

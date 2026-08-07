@@ -539,6 +539,144 @@ body::after {
       transparent calc(50% + 1px));
 }
 
+/* ---------- Title screen ---------- */
+
+.title { position: absolute; inset: 0; overflow: hidden; }
+.title-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.title-inner {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  justify-content: center;
+  padding: 0 7vw;
+  gap: 40px;
+}
+.title-mark { max-width: 46ch; }
+.title-name {
+  font-family: var(--display); font-weight: 400;
+  text-transform: uppercase;
+  font-size: clamp(56px, 8.5vw, 116px);
+  line-height: 0.82; letter-spacing: -0.01em;
+  color: var(--paper);
+  margin-top: 14px;
+  text-shadow: 0 6px 34px rgba(0,0,0,0.75);
+}
+.title-name em { display: block; font-style: normal; color: var(--hazard); }
+.title-tag {
+  margin-top: 18px;
+  font-size: 11px; line-height: 1.9;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--paper-3);
+  max-width: 44ch;
+}
+.title-paths { display: flex; gap: 14px; flex-wrap: wrap; }
+.path {
+  position: relative;
+  appearance: none; cursor: pointer; text-align: left;
+  min-width: 268px;
+  padding: 20px 22px 18px;
+  background: rgba(20,18,14,0.72);
+  border: 1px solid var(--paper-4);
+  backdrop-filter: blur(3px);
+  font-family: var(--mono);
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+  clip-path: polygon(11px 0, 100% 0, 100% calc(100% - 11px), calc(100% - 11px) 100%, 0 100%, 0 11px);
+}
+.path:hover {
+  background: rgba(255,90,31,0.16);
+  border-color: var(--hazard);
+  transform: translateY(-3px);
+}
+.p-num {
+  display: block;
+  font-family: var(--display); font-size: 15px;
+  color: var(--hazard); letter-spacing: 0.2em;
+}
+.p-name {
+  display: block; margin-top: 4px;
+  font-family: var(--display); font-size: 38px;
+  line-height: 1; text-transform: uppercase;
+  color: var(--paper);
+}
+.p-desc {
+  display: block; margin-top: 8px;
+  font-size: 10px; line-height: 1.7;
+  letter-spacing: 0.07em; color: var(--paper-3);
+  max-width: 30ch;
+}
+.title-foot {
+  position: absolute; bottom: 16px; right: 20px;
+  font-size: 9px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--paper-4);
+}
+
+/* ---------- Modal config triggers ---------- */
+
+.triggers {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 8px; margin: 4px 0 18px;
+}
+.trigger {
+  appearance: none; cursor: pointer; text-align: left;
+  padding: 13px 15px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--paper-4);
+  font-family: var(--mono);
+  transition: background 0.12s, border-color 0.12s;
+}
+.trigger:hover { background: rgba(255,90,31,0.1); border-color: var(--hazard); }
+.trigger::after { content: " ▸"; float: right; color: var(--hazard); font-size: 11px; }
+.tg-name {
+  display: block;
+  font-size: 12px; font-weight: 700;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--paper);
+}
+.tg-sum {
+  display: block; margin-top: 4px;
+  font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--paper-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stash[hidden] { display: none; }
+
+.overlay.blur {
+  background: rgba(8, 7, 5, 0.72);
+  backdrop-filter: blur(7px);
+  -webkit-backdrop-filter: blur(7px);
+}
+.panel.modal { animation: modalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-x {
+  appearance: none; background: none;
+  border: 1px solid var(--paper-4);
+  color: var(--paper-3);
+  width: 26px; height: 26px;
+  cursor: pointer; font-size: 12px;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.modal-x:hover { background: var(--hazard); color: var(--ink); border-color: var(--hazard); }
+.modal-body { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
+
+.pause-note {
+  font-size: 10px; line-height: 1.8;
+  letter-spacing: 0.08em; color: var(--paper-3);
+  margin: 6px 0 18px;
+}
+
+.ftab.back { color: var(--hazard); }
+.ftab.back:hover { background: rgba(255,90,31,0.12); color: var(--hazard); }
+
 /* ---------- Online: host-or-join flow ---------- */
 
 .choice {
@@ -946,16 +1084,42 @@ body::after {
 .timer.low { color: var(--alarm); animation: blink 0.42s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0.25; } }
 
-.wind { color: var(--paper-3); letter-spacing: 0.16em; }
-.wind .arrow {
-  font-size: 15px; color: var(--hazard); font-weight: 700;
-  display: inline-block; min-width: 14px; text-align: center;
+/* Wind: arrow + number + colour-coded strength bar. */
+.wind { gap: 10px !important; }
+.wind-label {
+  font-size: 9px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--paper-4);
 }
-.wind .bars { display: flex; gap: 2px; align-items: flex-end; height: 12px; }
-.wind .bars i {
-  width: 3px; background: var(--char-2); align-self: flex-end;
+.wind-arrow {
+  font-family: var(--display);
+  font-size: 27px; line-height: 1;
+  min-width: 20px; text-align: center;
+  color: var(--acid);
+  transition: color 0.2s;
 }
-.wind .bars i.on { background: var(--hazard); }
+.wind-arrow.calm { color: var(--paper-4); }
+.wind-read { display: flex; flex-direction: column; gap: 3px; }
+.wind-num {
+  font-family: var(--display); font-size: 19px; line-height: 1;
+  color: var(--paper); font-variant-numeric: tabular-nums;
+}
+.wind-meter {
+  width: 58px; height: 4px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid var(--char-2);
+  display: block;
+}
+.wind-meter i {
+  display: block; height: 100%;
+  background: var(--acid);
+  transition: width 0.3s, background 0.3s;
+}
+.wind[data-level="mid"] .wind-meter i,
+.wind[data-level="mid"] .wind-arrow { background: var(--amber); color: var(--amber); }
+.wind[data-level="mid"] .wind-arrow { background: none; }
+.wind[data-level="high"] .wind-meter i,
+.wind[data-level="high"] .wind-arrow { background: var(--alarm); color: var(--alarm); }
+.wind[data-level="high"] .wind-arrow { background: none; }
 
 .mode-info { color: var(--acid); letter-spacing: 0.14em; }
 
@@ -1047,6 +1211,14 @@ body::after {
   position: absolute; bottom: 0; right: 2px;
   font-size: 7px; color: var(--acid); letter-spacing: -1px;
 }
+.weapon-slot .ammo {
+  position: absolute; bottom: 1px; left: 3px;
+  font-size: 8px; letter-spacing: 0;
+  color: var(--acid); font-weight: 700;
+}
+.weapon-slot.empty { opacity: 0.34; cursor: not-allowed; }
+.weapon-slot.empty .ammo { color: var(--alarm); }
+
 .weapon-slot.banned { opacity: 0.25; cursor: not-allowed; }
 .weapon-slot.banned::after {
   content: "";
