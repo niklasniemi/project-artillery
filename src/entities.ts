@@ -47,6 +47,10 @@ export class Tank {
   /** Rounds left per weapon; Infinity when the host set no limit. */
   ammo: number[] = WEAPONS.map(() => Infinity);
 
+  /** Special-move meter, filled by damage dealt. */
+  special = 0;
+  get specialReady(): boolean { return this.special >= SPECIAL_MAX; }
+
   hasAmmo(index: number): boolean {
     return (this.ammo[index] ?? 0) > 0;
   }
@@ -220,10 +224,17 @@ export class Tank {
   }
 }
 
+/** Two impacts and an energy bubble collapses. */
+export const SHIELD_HITS = 2;
+
 /**
- * A deployed energy dome. Unlike the old terrain dome this is a real object,
- * which is what makes one-way protection possible: shots crossing *inward*
- * from outside are stopped, shots crossing *outward* from inside pass freely.
+ * A deployed energy bubble. It belongs to nobody once placed: anything
+ * crossing *inward* from outside is stopped, anything crossing *outward*
+ * from inside passes freely — so whoever is inside can shoot out, and
+ * everyone outside bounces off it, including whoever put it there.
+ *
+ * It is a full circle rather than a dome, so it can be anchored in mid-air
+ * or half-buried in the ground without changing how it behaves.
  */
 export class Shield {
   hits: number;
@@ -238,7 +249,7 @@ export class Shield {
     public ownerSeat: number,
     public team: number,
     public color: string,
-    hits = 3,
+    hits = SHIELD_HITS,
     turns = 3,
   ) {
     this.hits = hits;
@@ -249,27 +260,25 @@ export class Shield {
     return this.hits <= 0 || this.turnsLeft <= 0;
   }
 
-  /** Shots are only stopped by the dome itself, never below its base line. */
+  /** Full circle — the bubble works the same in the air or half-buried. */
   coversPoint(px: number, py: number): boolean {
-    if (py > this.y) return false;
     const dx = px - this.x, dy = py - this.y;
     return dx * dx + dy * dy <= this.radius * this.radius;
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
-    const life = clamp(this.turnsLeft / 3, 0.25, 1);
+    const life = clamp(this.turnsLeft / 3, 0.3, 1);
     const shimmer = 0.5 + 0.5 * Math.sin(performance.now() / 260 + this.x * 0.01);
     ctx.save();
 
-    // Body: faint energy fill inside the dome.
+    // Body: faint energy fill, denser toward the shell.
     const g = ctx.createRadialGradient(this.x, this.y, this.radius * 0.2, this.x, this.y, this.radius);
     g.addColorStop(0, "rgba(255,255,255,0)");
     g.addColorStop(0.78, `rgba(120, 235, 255, ${0.05 * life})`);
-    g.addColorStop(1, `rgba(120, 235, 255, ${0.16 * life})`);
+    g.addColorStop(1, `rgba(120, 235, 255, ${0.18 * life})`);
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(this.x, this.y, this.radius, Math.PI, TAU);
-    ctx.closePath();
+    ctx.arc(this.x, this.y, this.radius, 0, TAU);
     ctx.fill();
 
     // Rim, brighter right after absorbing a hit.
@@ -278,18 +287,87 @@ export class Shield {
     ctx.globalAlpha = clamp(0.35 * life + shimmer * 0.18 + this.flash, 0, 1);
     ctx.lineWidth = 2.5 + this.flash * 4;
     ctx.beginPath();
-    ctx.arc(this.x, this.y, this.radius, Math.PI, TAU);
+    ctx.arc(this.x, this.y, this.radius, 0, TAU);
     ctx.stroke();
 
-    // Remaining-charge ticks along the crown.
-    ctx.globalAlpha = 0.55 * life;
-    ctx.lineWidth = 3;
+    // Remaining-charge pips around the top of the bubble.
+    ctx.globalAlpha = 0.6 * life;
+    ctx.lineWidth = 3.5;
     for (let i = 0; i < this.hits; i++) {
-      const a = Math.PI + (i + 1) * (Math.PI / (this.hits + 1));
+      const a = -Math.PI / 2 + (i - (this.hits - 1) / 2) * 0.28;
       ctx.beginPath();
-      ctx.arc(this.x, this.y, this.radius - 7, a - 0.06, a + 0.06);
+      ctx.arc(this.x, this.y, this.radius - 7, a - 0.07, a + 0.07);
       ctx.stroke();
     }
+    ctx.restore();
+  }
+}
+
+/** Charge needed before the special can be fired. */
+export const SPECIAL_MAX = 100;
+
+/** A repair field that mends anything standing in it, for a few rounds. */
+export class HealZone {
+  turnsLeft: number;
+  pulse = 0;
+
+  constructor(
+    public x: number,
+    public y: number,
+    public radius: number,
+    public healPerRound: number,
+    turns: number,
+  ) {
+    this.turnsLeft = turns;
+  }
+
+  get dead(): boolean { return this.turnsLeft <= 0; }
+
+  covers(px: number, py: number): boolean {
+    const dx = px - this.x, dy = py - this.y;
+    return dx * dx + dy * dy <= this.radius * this.radius;
+  }
+
+  draw(ctx: CanvasRenderingContext2D): void {
+    const t = performance.now() / 1000;
+    const breathe = 0.5 + 0.5 * Math.sin(t * 1.8);
+    ctx.save();
+    const g = ctx.createRadialGradient(this.x, this.y, this.radius * 0.15, this.x, this.y, this.radius);
+    g.addColorStop(0, `rgba(77, 255, 168, ${0.05 + breathe * 0.04})`);
+    g.addColorStop(0.7, "rgba(77, 255, 168, 0.05)");
+    g.addColorStop(1, "rgba(77, 255, 168, 0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, TAU);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = "#4dffa8";
+    ctx.globalAlpha = 0.3 + breathe * 0.25 + this.pulse;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([9, 7]);
+    ctx.lineDashOffset = -t * 22;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Medical cross at the centre.
+    ctx.globalAlpha = 0.45 + breathe * 0.25;
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    const a = 11;
+    ctx.beginPath();
+    ctx.moveTo(this.x - a, this.y); ctx.lineTo(this.x + a, this.y);
+    ctx.moveTo(this.x, this.y - a); ctx.lineTo(this.x, this.y + a);
+    ctx.stroke();
+
+    // Remaining rounds.
+    ctx.globalAlpha = 0.7;
+    ctx.font = "700 10px ui-monospace, Menlo, monospace";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#4dffa8";
+    ctx.fillText(`${this.turnsLeft}`, this.x, this.y - this.radius + 16);
     ctx.restore();
   }
 }

@@ -138,6 +138,28 @@ const PATHS: Record<string, string> = {
     <path d="M4 19.4c2.6 1.8 5.4 2.6 8 2.6s5.4-.8 8-2.6"/>
     <path d="M4 19.4l3-.8M4 19.4l.6 3" />`,
 
+  // Rising landmass with an upward arrow.
+  terraform: `
+    <path d="M2 19.5h20"/>
+    <path d="M2.5 16.5c3-4.5 5-4.5 7.5 0M11 16.5c2.5-3.5 4.5-3.5 7 0"/>
+    <path d="M12 12.4V3.4"/>
+    <path d="M8.4 6.8 12 3.2l3.6 3.6"/>
+    <path d="M5.2 13.4h2M17 13.4h1.9"/>`,
+
+  // Repair cross inside a field ring.
+  medbay: `
+    <circle cx="12" cy="12" r="9.2" stroke-dasharray="3.4 3"/>
+    <path d="M12 7.2v9.6M7.2 12h9.6"/>
+    <path d="M4.6 4.6 6.4 6.4M19.4 4.6 17.6 6.4M4.6 19.4l1.8-1.8M19.4 19.4l-1.8-1.8"/>`,
+
+  // Barrage raining onto a marked zone.
+  hellstorm: `
+    <path d="M4 2.6v6M8.6 2v7.6M13.4 2v7.6M18 2.6v6"/>
+    <path d="M2.6 14.6h18.8"/>
+    <path d="M6 12.4l-1 2.2M11 11.8l-1 2.8M16 12.4l-1 2.2"/>
+    <path d="M8 18.2c1.4-1.6 2.6-1.6 4 0 1.4 1.6 2.6 1.6 4 0"/>
+    <path d="M12 20.4v1.4"/>`,
+
   // Portal with a body passing through.
   teleport: `
     <ellipse cx="12" cy="12" rx="4.4" ry="8.4"/>

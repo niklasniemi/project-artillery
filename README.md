@@ -5,7 +5,8 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 ## Features
 
 - **Animated title screen** with two clean paths — Local Game and Online Game — and match settings collapsed into Theatre / Rules / Armory modals
-- **One-way energy shields** — shots fired from inside pass out freely, incoming enemy fire is stopped; press `SPACE` mid-flight to anchor the dome in mid-air
+- **One-way energy shields** — anyone inside can shoot out, everyone outside bounces off, including whoever placed it. Full spheres, so they work anchored in mid-air (`SPACE` mid-flight) or half-buried. Two impacts collapse one
+- **HELLSTORM special** — a meter charged by damage dealt unlocks a marker shot that triggers a shared cinematic: the cannon spins up, fires skyward, then lances rain down on the marked ground (`X`)
 - **Ammo limits** — the host can cap rounds per weapon (1/2/3/unlimited); the basic Shell always stays stocked
 - **Supply crates** parachute in between turns; drive over one or shoot it to claim the heal
 - **Six themed theatres** — Nightfall, Dune Sea, Frostbite, Ashlands, Verdant and Orbital, each with its own sky, rock palette, hazard colour and weather, picked from rendered map cards
@@ -15,7 +16,7 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 - **Trick-shot bonuses** — direct hits, long shots, bank shots, multi-kills, void kills and revenge kills all pay bonus XP
 - **Weapon bans** — the host can strike any ordnance out of the match from the armory grid
 - **Fully destructible terrain** — every explosion carves the map; tanks can be buried or dropped into the void
-- **All 20 weapons** with in-match Tier 1 → 3 upgrades: Shell, Mortar, Splitter, Digger, Sniper, Bouncer, Roller, Shielder, Cluster, MIRV, Airstrike, Napalm, Nuke, Twins, Homing, Grenade, Railstrike, Quake, Leech, Teleport
+- **22 weapons** with in-match Tier 1 → 3 upgrades: Shell, Mortar, Splitter, Digger, Sniper, Bouncer, Roller, Shielder, Cluster, MIRV, Airstrike, Napalm, Nuke, Twins, Homing, Grenade, Railstrike, Quake, Leech, **Terraformer** (grows permanent ground, in the air or on it, lifting anyone it would bury), **Medbay** (repair field that mends for two rounds), Teleport
 - **4 game modes** — Deathmatch, Points (respawns + score), Juggernaut (one 3×-HP boss vs all), Assassination (2v2, protect your VIP ♛)
 - **Physics-driven combat** — gravity, per-turn dynamic wind, bounces, homing, hitscan beams
 - **In-match XP** — deal damage, level up, and upgrade your arsenal mid-game; resets every match
@@ -101,6 +102,7 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | Mouse wheel | Zoom the scouting camera (1×–4×) |
 | Drag the ground | Look around (while zoomed in; right-drag works at any zoom) |
 | C | Recentre the camera |
+| X | Fire the HELLSTORM special (when charged) |
 | U | Open upgrade panel (when you have points) |
 | Esc | Pause / quit menu, or step back one level in menus |
 | Space / click | Skip a cutscene or kill cam |

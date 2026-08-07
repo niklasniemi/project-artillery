@@ -1,8 +1,8 @@
 import { Terrain } from "./terrain";
-import { Tank, Projectile, Crate, CrateKind, Shield, TANK_RADIUS } from "./entities";
+import { Tank, Projectile, Crate, CrateKind, Shield, SHIELD_HITS, HealZone, SPECIAL_MAX, TANK_RADIUS } from "./entities";
 import { Loadout, TankPalette, drawChassis } from "./tanks";
 import { Particles, ScreenShake } from "./particles";
-import { WEAPONS, levelForXp } from "./weapons";
+import { WEAPONS, HELLSTORM, levelForXp } from "./weapons";
 import { UI, MatchSettings } from "./ui";
 import { planShot, planMove, AiPlan } from "./ai";
 import { physics, configurePhysics } from "./physics";
@@ -40,6 +40,7 @@ export interface FireMsg {
   x: number; y: number;
   angle: number; power: number;
   weapon: number;
+  special?: boolean;
 }
 
 export interface SplitMsg {
@@ -51,7 +52,7 @@ export interface Snapshot {
     seat: number; x: number; y: number;
     hp: number; maxHp: number; fuel: number; alive: boolean;
     xp: number; level: number; up: number; tiers: number[];
-    kills: number; dmg: number; turns: number; ammo: number[];
+    kills: number; dmg: number; turns: number; ammo: number[]; special: number;
   }[];
   crates: { kind: CrateKind; x: number; y: number; landed: boolean; collected: boolean }[];
   shields: {
@@ -122,14 +123,39 @@ interface KillCam {
   shooterName: string;
 }
 
-type CineKind = "intro" | "killcam";
+type CineKind = "intro" | "killcam" | "hellstorm";
+
+/** Scripted state for the HELLSTORM barrage cinematic. */
+interface HellStorm {
+  /** Centre of the marked area. */
+  x: number;
+  /** Tank that called it in. */
+  ownerSeat: number;
+  originX: number;
+  originY: number;
+  angle: number;
+  /**
+   * Pre-rolled strike offsets, timings and impact heights. Heights are fixed
+   * up front so the barrage spreads along the original ground line instead of
+   * each lance drilling deeper into the crater the last one dug.
+   */
+  strikes: { dx: number; gy: number; delay: number; fired: boolean }[];
+  damage: number;
+  radius: number;
+}
 
 interface Cinematic {
   kind: CineKind;
   t: number;
   duration: number;
   killCam?: KillCam;
+  storm?: HellStorm;
 }
+
+/** Cinematic beats, in seconds. */
+const HS_CHARGE = 1.15;   // cannon spins up
+const HS_ASCENT = 0.75;   // round climbs out of frame
+const HS_RAIN = 2.6;      // lances come down
 
 const INTRO_PER_TANK = 0.85;
 const INTRO_OUTRO = 0.7;
@@ -152,6 +178,7 @@ export class Game {
   private beams: Beam[] = [];
   private crates: Crate[] = [];
   private shields: Shield[] = [];
+  private zones: HealZone[] = [];
   private particles = new Particles();
   private shake = new ScreenShake();
   private bg: HTMLCanvasElement;
@@ -276,6 +303,7 @@ export class Game {
     this.beams = [];
     this.crates = [];
     this.shields = [];
+    this.zones = [];
     this.tanks = [];
     this.awaitingAdvance = false;
     this.shot = null;
@@ -403,6 +431,14 @@ export class Game {
       return;
     }
 
+    // The barrage carved terrain and dealt damage, so let everything settle
+    // and go through the normal end-of-turn path (snapshot, kill cam, sync).
+    if (kind === "hellstorm") {
+      this.phase = "settle";
+      this.settleTime = 0.9;
+      return;
+    }
+
     // Kill cam finished — resume the turn hand-off it was holding up.
     if (this.queuedAdvance) {
       const q = this.queuedAdvance;
@@ -420,6 +456,7 @@ export class Game {
     if (!c) { this.phase = "input"; return; }
     c.t += dt;
     if (c.kind === "intro") this.updateIntro(c);
+    else if (c.kind === "hellstorm") this.updateHellstorm(c);
     else this.updateKillCam(c);
     if (c.t >= c.duration) this.endCinematic();
   }
@@ -543,6 +580,126 @@ export class Game {
     this.cam.y = clamp(this.cam.y, halfH, WORLD_H - halfH);
   }
 
+  /**
+   * The marker landed: roll the barrage pattern from the seeded RNG so every
+   * client produces the same strikes, then hand over to the cinematic.
+   */
+  private beginHellstorm(p: Projectile): void {
+    p.alive = false;
+    const owner = p.owner;
+    const count = p.stats.count ?? 9;
+    const spread = p.stats.radius * 2.6;
+    const strikes: HellStorm["strikes"] = [];
+    for (let i = 0; i < count; i++) {
+      const dx = rngRange(this.rng, -spread, spread);
+      const gx = clamp(p.x + dx, 8, WORLD_W - 8);
+      const surface = this.terrain.surfaceY(gx);
+      strikes.push({
+        dx,
+        gy: surface >= 0 ? surface : WORLD_H - 4,
+        // Staggered so they land as a rolling barrage, not one thud.
+        delay: (i / count) * (HS_RAIN * 0.75) + rngRange(this.rng, 0, 0.12),
+        fired: false,
+      });
+    }
+    strikes.sort((a, b) => a.delay - b.delay);
+
+    const storm: HellStorm = {
+      x: p.x, ownerSeat: owner.seat,
+      originX: owner.x, originY: owner.y - 10,
+      angle: owner.angle,
+      strikes,
+      damage: p.stats.damage,
+      radius: p.stats.radius,
+    };
+
+    this.phase = "cinematic";
+    this.cine = {
+      kind: "hellstorm", t: 0,
+      duration: HS_CHARGE + HS_ASCENT + HS_RAIN,
+      storm,
+    };
+    this.cam = { x: owner.x, y: owner.y - 40, zoom: 1.9 };
+    this.clampCamera();
+    this.ui.setCinematic(true, "Hellstorm");
+    this.ui.setCinematicCard({
+      name: "Hellstorm", type: owner.name, role: "orbital barrage",
+      color: "#ff2e4d", index: 0, total: 0,
+    });
+    sfx.fire("energy");
+  }
+
+  private updateHellstorm(c: Cinematic): void {
+    const s = c.storm!;
+    const t = c.t;
+
+    if (t < HS_CHARGE) {
+      // Camera holds on the firing tank while the cannon spins up.
+      const k = t / HS_CHARGE;
+      this.cam.x = lerp(this.cam.x, s.originX, 0.1);
+      this.cam.y = lerp(this.cam.y, s.originY - 30, 0.1);
+      this.cam.zoom = lerp(this.cam.zoom, 2.5, 0.05);
+      if (Math.random() < 0.5) {
+        const a = Math.random() * TAU;
+        const d = 70 * (1 - k) + 12;
+        this.particles.spawn(
+          s.originX + Math.cos(a) * d, s.originY + Math.sin(a) * d,
+          -Math.cos(a) * d * 2.2, -Math.sin(a) * d * 2.2,
+          0.32, 3.2, "#ff2e4d", 0, 2, 1.5,
+        );
+      }
+      this.shake.add(0.035);
+    } else if (t < HS_CHARGE + HS_ASCENT) {
+      // The round leaves the barrel and climbs out of the world.
+      const k = (t - HS_CHARGE) / HS_ASCENT;
+      if (k < 0.05) {
+        this.particles.muzzle(s.originX, s.originY, -Math.PI / 2, "#ff2e4d");
+        this.shake.add(0.5, 0, 0.6);
+        sfx.explosion(0.7);
+      }
+      const y = s.originY - k * 900;
+      this.particles.spawn(s.originX + rngRange(Math.random, -3, 3), y, 0, 240, 0.45, 5, "#ff2e4d", 0, 2, 1);
+      this.cam.y = lerp(this.cam.y, s.originY - 220, 0.08);
+      this.cam.zoom = lerp(this.cam.zoom, 1.35, 0.08);
+    } else {
+      // Barrage: lances fall straight down onto the marked area.
+      const rt = t - HS_CHARGE - HS_ASCENT;
+      this.cam.x = lerp(this.cam.x, s.x, 0.09);
+      this.cam.y = lerp(this.cam.y, WORLD_H * 0.55, 0.07);
+      this.cam.zoom = lerp(this.cam.zoom, 1.5, 0.05);
+      const owner = this.tanks.find((tk) => tk.seat === s.ownerSeat);
+      for (const strike of s.strikes) {
+        if (strike.fired || rt < strike.delay) continue;
+        strike.fired = true;
+        const gx = clamp(s.x + strike.dx, 8, WORLD_W - 8);
+        this.fireHellLance(gx, strike.gy, owner);
+      }
+    }
+    this.clampCamera();
+  }
+
+  /** One descending lance: a vertical streak plus a blast where it lands. */
+  private fireHellLance(gx: number, gy: number, owner: Tank | undefined): void {
+    const s = this.cine?.storm;
+    if (!s) return;
+
+    for (let i = 0; i < 16; i++) {
+      this.particles.spawn(
+        gx + rngRange(Math.random, -4, 4), gy - i * 42,
+        rngRange(Math.random, -12, 12), 900,
+        0.3, 4.5 - i * 0.15, i % 3 === 0 ? "#ffd0d6" : "#ff2e4d", 0, 2, 0.6,
+      );
+    }
+    this.particles.ring(gx, gy, s.radius * 2.4, 0.4, "rgba(255,60,90,0.95)", 3);
+    if (owner) {
+      this.blastAt(gx, gy, s.radius, s.damage, owner, {});
+    } else {
+      this.terrain.carve(gx, gy, s.radius);
+      this.particles.explosion(gx, gy, s.radius);
+    }
+    this.shake.add(0.42, 0, 0.5);
+  }
+
   private startKillCam(kc: KillCam): void {
     this.phase = "cinematic";
     this.killCamDetonated = false;
@@ -635,6 +792,22 @@ export class Game {
       if (s.ownerSeat === t.seat) s.turnsLeft--;
     }
     this.shields = this.shields.filter((s) => !s.dead);
+
+    // Repair fields mend whoever is standing in them, then count down.
+    for (const z of this.zones) {
+      for (const tank of this.tanks) {
+        if (!tank.alive || !z.covers(tank.x, tank.y - 8)) continue;
+        const before = tank.hp;
+        tank.hp = Math.min(tank.maxHp, tank.hp + z.healPerRound);
+        if (tank.hp > before) {
+          z.pulse = 0.5;
+          this.particles.burst(tank.x, tank.y - 10, 14, 110, ["#4dffa8", "#d8ffe8"], 0.8, 3, -70, 2);
+          if (!tank.isAI) this.ui.award("Repaired", tank.hp - before);
+        }
+      }
+      z.turnsLeft--;
+    }
+    this.zones = this.zones.filter((z) => !z.dead);
     this.rollWind();
     this.maybeDropCrate();
     this.turnTimeLeft = this.settings.turnSeconds;
@@ -719,12 +892,31 @@ export class Game {
 
   // ---------- Firing ----------
 
-  fire(fromNet = false): void {
+  /** Launches the charged special instead of the selected gun. */
+  fireSpecial(): void {
+    if (this.phase !== "input" || !this.isMyTurn()) return;
+    const t = this.currentTank;
+    if (!t.specialReady) {
+      this.ui.banner("Special not charged", "#ff3355");
+      return;
+    }
+    this.fire(false, true);
+  }
+
+  fire(fromNet = false, special = false): void {
     if (this.phase !== "input") return;
     const t = this.currentTank;
     if (!fromNet && this.online && this.isMyTurn()) {
-      const msg: FireMsg = { x: t.x, y: t.y, angle: t.angle, power: t.power, weapon: t.selectedWeapon };
+      const msg: FireMsg = {
+        x: t.x, y: t.y, angle: t.angle, power: t.power,
+        weapon: t.selectedWeapon, special,
+      };
       this.online.send("fire", msg);
+    }
+    if (special) {
+      t.special = 0;
+      this.ui.updateSpecial(0, false);
+      this.ui.banner("HELLSTORM INBOUND", "#ff2e4d");
     }
     // Out of rounds? Fall back to the always-stocked Shell rather than
     // silently doing nothing and hanging the turn.
@@ -732,10 +924,10 @@ export class Game {
       t.selectedWeapon = this.firstAllowedWeapon(t);
       this.ui.updateWeapons(t);
     }
-    if (Number.isFinite(t.ammo[t.selectedWeapon])) t.ammo[t.selectedWeapon] -= 1;
+    if (!special && Number.isFinite(t.ammo[t.selectedWeapon])) t.ammo[t.selectedWeapon] -= 1;
 
-    const def = t.weaponDef;
-    const stats = t.weaponStats;
+    const def = special ? HELLSTORM : t.weaponDef;
+    const stats = special ? HELLSTORM.tiers[0] : t.weaponStats;
     const tip = t.barrelTip;
 
     this.shot = {
@@ -866,7 +1058,7 @@ export class Game {
     // Our sim already resolved the shot — place the dome from the report.
     this.shields.push(new Shield(
       msg.x, msg.y, t.weaponStats.radius * t.attrs.blast,
-      t.seat, t.team, t.palette.glow, 3, 3,
+      t.seat, t.team, t.palette.glow, SHIELD_HITS, 3,
     ));
   }
 
@@ -950,6 +1142,27 @@ export class Game {
 
     if (behavior === "shielder") {
       this.deployShield(p);
+      return;
+    }
+
+    if (behavior === "hellstorm") {
+      this.beginHellstorm(p);
+      return;
+    }
+
+    if (behavior === "terraform") {
+      this.growTerrain(p.x, p.y, stats.radius * p.owner.attrs.blast);
+      return;
+    }
+
+    if (behavior === "medbay") {
+      this.zones.push(new HealZone(
+        p.x, p.y, stats.radius * p.owner.attrs.blast,
+        stats.heal ?? 14, stats.rounds ?? 2,
+      ));
+      this.particles.ring(p.x, p.y, stats.radius * 2, 0.6, "rgba(77,255,168,0.9)", 3);
+      this.particles.burst(p.x, p.y, 26, 150, ["#4dffa8", "#d8ffe8"], 1, 3, -50, 2);
+      sfx.pickup();
       return;
     }
 
@@ -1056,15 +1269,39 @@ export class Game {
     });
   }
 
+  /**
+   * Grows permanent ground. Anything that would end up buried is lifted onto
+   * the new surface instead of being trapped inside it.
+   */
+  private growTerrain(x: number, y: number, r: number): void {
+    this.terrain.addBlob(x, y, r);
+    this.particles.burst(x, y, 30, 170, ["#a9d18e", "#7d9c68", "#c7dcb4"], 1.1, 4, 260);
+    this.particles.ring(x, y, r * 2, 0.5, "rgba(169,209,142,0.8)", 3);
+    sfx.explosion(0.35);
+    this.shake.add(0.3);
+
+    for (const tank of this.tanks) {
+      if (!tank.alive) continue;
+      if (!this.terrain.solid(tank.x, tank.y - 2)) continue;
+      // Buried: walk up to the new surface and set down on it.
+      const surface = this.terrain.surfaceY(tank.x, Math.max(0, (y - r * 1.6) | 0));
+      if (surface >= 0 && surface < tank.y) {
+        tank.y = surface;
+        tank.vy = 0;
+        tank.fallFrom = -1;
+        this.particles.sparks(tank.x, tank.y, 10);
+      }
+    }
+  }
+
   /** Anchors a dome at the projectile's position and consumes the shot. */
   private deployShield(p: Projectile): void {
     p.alive = false;
     const owner = p.owner;
-    const tier = owner.weaponTiers[owner.selectedWeapon] ?? 0;
     this.shields.push(new Shield(
       p.x, p.y, p.stats.radius * owner.attrs.blast,
       owner.seat, owner.team, owner.palette.glow,
-      3 + tier, 3,
+      SHIELD_HITS, 3,
     ));
     this.particles.ring(p.x, p.y, p.stats.radius * 2.2, 0.5, "rgba(120,235,255,0.9)", 3);
     this.particles.burst(p.x, p.y, 22, 150, ["#78ebff", "#ffffff"], 0.7, 3, -40, 2);
@@ -1073,10 +1310,12 @@ export class Game {
   }
 
   /**
-   * One-way blocking. A shot crossing a dome from outside inward is stopped;
-   * crossing outward — i.e. fired from within — passes freely. Using the
-   * crossing direction rather than a proximity test also means fast shells
-   * cannot tunnel through the shell wall.
+   * One-way blocking, owner-agnostic. A shot crossing a bubble from outside
+   * inward is stopped; crossing outward — i.e. fired from within — passes
+   * freely. Whoever placed it gets no special treatment: stand inside and you
+   * can shoot out, stand outside and you bounce off, even off your own.
+   * Testing the crossing rather than proximity also stops fast shells
+   * tunnelling through the shell wall.
    */
   private blockedByShield(p: Projectile, prevX: number, prevY: number): boolean {
     for (const s of this.shields) {
@@ -1084,8 +1323,6 @@ export class Game {
       const wasInside = s.coversPoint(prevX, prevY);
       const nowInside = s.coversPoint(p.x, p.y);
       if (wasInside || !nowInside) continue;     // outgoing or unrelated
-      if (p.owner.seat === s.ownerSeat) continue; // never blocked by your own dome
-      if (s.team >= 0 && p.owner.team === s.team) continue; // teammates pass
       s.hits--;
       s.flash = 0.6;
       this.particles.ring(p.x, p.y, 70, 0.4, "rgba(150,240,255,0.95)", 3);
@@ -1113,6 +1350,8 @@ export class Game {
     tank.hp = Math.max(0, tank.hp - dmg);
     if (tank.isEnemyOf(source)) {
       source.damageDealt += dmg;
+      // Every point of damage feeds the special meter.
+      source.special = Math.min(SPECIAL_MAX, source.special + dmg * 0.55);
       tank.lastDamagedBy = source;
       if (this.shot && this.shot.owner === source) this.shot.dealtDamage = true;
       this.grantXp(source, dmg);
@@ -1276,7 +1515,8 @@ export class Game {
     t.power = clamp(msg.power, 1, 100);
     t.selectedWeapon = clamp(msg.weapon, 0, WEAPONS.length - 1);
     this.ui.updateWeapons(t);
-    this.fire(true);
+    if (msg.special) t.special = 0;
+    this.fire(true, !!msg.special);
   }
 
   remoteSplit(seat: number, msg: SplitMsg): void {
@@ -1335,6 +1575,7 @@ export class Game {
         kills: t.kills, dmg: t.damageDealt, turns: t.turnsTaken,
         // Infinity does not survive JSON — send -1 and restore on the way in.
         ammo: t.ammo.map((a) => (Number.isFinite(a) ? a : -1)),
+        special: t.special,
       })),
       crates: this.crates.map((c) => ({ kind: c.kind, x: c.x, y: c.y, landed: c.landed, collected: c.collected })),
       shields: this.shields.map((s) => ({
@@ -1356,6 +1597,7 @@ export class Game {
       t.weaponTiers = [...ts.tiers];
       t.kills = ts.kills; t.damageDealt = ts.dmg; t.turnsTaken = ts.turns;
       if (ts.ammo) t.ammo = ts.ammo.map((a) => (a < 0 ? Infinity : a));
+      if (typeof ts.special === "number") t.special = ts.special;
     }
     this.crates = s.crates.map((cs) => {
       const c = new Crate(cs.kind, cs.x, cs.y);
@@ -1400,6 +1642,7 @@ export class Game {
       if (this.phase === "input" && this.isMyTurn()) {
         const num = e.key === "0" ? 10 : parseInt(e.key, 10);
         if (num >= 1 && num <= 10) this.selectWeapon(num - 1);
+        if (e.key.toLowerCase() === "x") this.fireSpecial();
         if (e.key.toLowerCase() === "q") this.cycleWeapon(-1);
         if (e.key.toLowerCase() === "e") this.cycleWeapon(1);
         if (e.key.toLowerCase() === "u") {
@@ -1549,6 +1792,7 @@ export class Game {
     if (this.phase === "cinematic") {
       if (catchUp) { this.endCinematic(); return; }
       this.particles.update(dt);
+      for (const z of this.zones) z.pulse = Math.max(0, z.pulse - dt * 1.5);
       this.shake.update(dt);
       this.updateCinematic(dt);
       return;
@@ -1566,6 +1810,11 @@ export class Game {
     this.shake.update(dt);
     this.updateWeather(dt);
     for (const s of this.shields) s.flash = Math.max(0, s.flash - dt * 2.2);
+    // Collapse spent bubbles right away rather than leaving a dead shell drawn.
+    if (this.shields.some((s) => s.hits <= 0)) {
+      this.shields = this.shields.filter((s) => s.hits > 0);
+    }
+    for (const z of this.zones) z.pulse = Math.max(0, z.pulse - dt * 1.5);
     this.flushNet(dt);
     for (const b of this.beams) b.life -= dt;
     this.beams = this.beams.filter((b) => b.life > 0);
@@ -1607,7 +1856,27 @@ export class Game {
     if (t && !catchUp) {
       this.ui.updateAim(t);
       this.ui.updateTimer(this.turnTimeLeft, this.settings.turnSeconds > 0 && this.phase === "input");
+      this.ui.updateSpecial(t.special, t.specialReady);
+      this.updateHudOcclusion();
     }
+  }
+
+  /** Fades the bottom cluster whenever a live tank sits behind it. */
+  private updateHudOcclusion(): void {
+    const r = this.ui.hudRect();
+    if (!r) return;
+    const pad = 26;
+    let hidden = false;
+    for (const tank of this.tanks) {
+      if (!tank.alive) continue;
+      const sx = (tank.x - this.cam.x) * this.cam.zoom + WORLD_W / 2;
+      const sy = (tank.y - this.cam.y) * this.cam.zoom + WORLD_H / 2;
+      if (sx > r.x0 - pad && sx < r.x1 + pad && sy > r.y0 - pad && sy < r.y1 + pad) {
+        hidden = true;
+        break;
+      }
+    }
+    this.ui.setHudDim(hidden);
   }
 
   private updateInputPhase(dt: number): void {
@@ -1715,6 +1984,9 @@ export class Game {
     }
 
     this.projectiles = this.projectiles.filter((p) => p.alive);
+    // Guard the phase: an impact may have handed control to a cinematic
+    // (the Hellstorm barrage), and settling would stomp on it.
+    if (this.phase !== "projectiles") return;
     if (this.projectiles.length === 0 && this.pendingBlasts.length === 0 && this.pendingSpawns.length === 0) {
       this.phase = "settle";
       this.settleTime = 0.9;
@@ -2054,6 +2326,8 @@ export class Game {
       this.drawKillCam(ctx);
       return;
     }
+    const storm = this.phase === "cinematic" && this.cine?.kind === "hellstorm"
+      ? this.cine : null;
 
     this.applyCamera(ctx);
 
@@ -2082,6 +2356,7 @@ export class Game {
     this.drawWeather(ctx);
 
     for (const crate of this.crates) crate.draw(ctx);
+    for (const z of this.zones) z.draw(ctx);
     for (const s of this.shields) s.draw(ctx);
 
     for (let i = 0; i < this.tanks.length; i++) {
@@ -2107,6 +2382,7 @@ export class Game {
     }
 
     for (const p of this.projectiles) p.draw(ctx);
+    if (storm) this.drawHellstorm(ctx, storm);
     this.particles.draw(ctx);
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -2137,6 +2413,61 @@ export class Game {
       this.vignette = v;
     }
     ctx.drawImage(this.vignette, 0, 0);
+  }
+
+  /** Charge glow on the cannon, the ascending round, and the target marker. */
+  private drawHellstorm(ctx: CanvasRenderingContext2D, c: Cinematic): void {
+    const s = c.storm!;
+    const t = c.t;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    if (t < HS_CHARGE) {
+      const k = t / HS_CHARGE;
+      const r = 6 + k * 26;
+      const g = ctx.createRadialGradient(s.originX, s.originY, 0, s.originX, s.originY, r);
+      g.addColorStop(0, `rgba(255,255,255,${0.6 * k})`);
+      g.addColorStop(0.4, `rgba(255,46,77,${0.7 * k})`);
+      g.addColorStop(1, "rgba(255,46,77,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(s.originX, s.originY, r, 0, TAU);
+      ctx.fill();
+      // Energy running up the barrel.
+      ctx.strokeStyle = `rgba(255,120,140,${0.5 + k * 0.5})`;
+      ctx.lineWidth = 2 + k * 4;
+      ctx.beginPath();
+      ctx.moveTo(s.originX, s.originY);
+      ctx.lineTo(s.originX + Math.cos(s.angle) * 40, s.originY + Math.sin(s.angle) * 40);
+      ctx.stroke();
+    } else if (t < HS_CHARGE + HS_ASCENT) {
+      const k = (t - HS_CHARGE) / HS_ASCENT;
+      const headY = s.originY - k * (s.originY + 200);
+      ctx.strokeStyle = "rgba(255,46,77,0.85)";
+      ctx.lineWidth = 7 * (1 - k * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(s.originX, s.originY);
+      ctx.lineTo(s.originX, headY);
+      ctx.stroke();
+      ctx.fillStyle = "#ffd0d6";
+      ctx.beginPath();
+      ctx.arc(s.originX, headY, 9 * (1 - k * 0.4), 0, TAU);
+      ctx.fill();
+    } else {
+      // Target marker pulsing over the impact zone.
+      const pulse = 0.5 + 0.5 * Math.sin(t * 12);
+      ctx.strokeStyle = `rgba(255,46,77,${0.5 + pulse * 0.4})`;
+      ctx.lineWidth = 2.5;
+      const gy = Math.max(0, this.terrain.surfaceY(s.x));
+      const rr = s.radius * 2.6;
+      ctx.beginPath();
+      ctx.ellipse(s.x, gy, rr, rr * 0.28, 0, 0, TAU);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(s.x, gy, rr * 0.55, rr * 0.15, 0, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   /**

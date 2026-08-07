@@ -286,6 +286,35 @@ export class Terrain {
     ctx.restore();
   }
 
+  /**
+   * Grows a permanent blob of ground. Behaves exactly like generated terrain
+   * afterwards — solid, diggable, destructible — so it is painted with the
+   * same crest/soil/body ramp instead of a flat colour patch.
+   * Returns the new surface height at the centre.
+   */
+  addBlob(cx: number, cy: number, r: number): number {
+    this.stampEllipse(cx, cy, r, r * 0.78, 1);
+
+    const ctx = this.ctx;
+    const top = cy - r * 0.78;
+    const { lip, soil, base, crest, soilBand } = this.paint;
+    const rgb = (c: [number, number, number]): string => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+    ctx.save();
+    const g = ctx.createLinearGradient(0, top, 0, cy + r * 0.78);
+    g.addColorStop(0, rgb(lip));
+    g.addColorStop(Math.min(0.4, crest / (r * 1.56)), rgb(lip));
+    g.addColorStop(Math.min(0.6, (crest + soilBand) / (r * 1.56)), rgb(soil));
+    g.addColorStop(1, rgb(base));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, r, r * 0.78, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    return this.surfaceY(cx, Math.max(0, (top - 4) | 0));
+  }
+
   /** Add a protective terrain dome (Shielder): a ring of solid matter. */
   addDome(cx: number, cy: number, r: number): void {
     const thickness = 13;

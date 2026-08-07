@@ -1020,6 +1020,11 @@ export class UI {
     // Owning this here means no entry path can leave the menu over a live match.
     this.menu.innerHTML = "";
     this.closeLobby();
+    this.closeWaiting();
+    this.closePause();
+    // A match can be (re)started while a cutscene is on screen — clear the
+    // cinematic state or its class would keep the whole HUD hidden.
+    this.setCinematic(false);
     const bannedSet = new Set(bannedWeapons);
     this.hud.innerHTML = `
       <div class="topbar">
@@ -1042,13 +1047,21 @@ export class UI {
         <div class="bar"><i id="x-fill" style="width:0%"></i></div>
         <span class="upgrade-hint" id="x-hint" style="display:none">UPGRADE [U]</span>
       </div>
-      <div class="bottombar">
+      <div class="bottombar" id="t-bottombar">
         <div class="aim-readout">
-          <div class="row"><span>Elev</span><span class="val" id="a-angle">45°</span></div>
-          <div class="row"><span>Chg</span><span class="val hot" id="a-power">62</span></div>
-          <div class="meter power"><i id="a-power-fill" style="width:62%"></i></div>
-          <div class="row"><span>Fuel</span><span class="val" id="a-fuel">100</span></div>
-          <div class="meter fuel"><i id="a-fuel-fill" style="width:100%"></i></div>
+          <div class="gauge"><span class="lb">Elev</span><span class="val" id="a-angle">45°</span></div>
+          <div class="gauge">
+            <span class="lb">Chg</span><span class="val hot" id="a-power">62</span>
+            <span class="meter power"><i id="a-power-fill" style="width:62%"></i></span>
+          </div>
+          <div class="gauge">
+            <span class="lb">Fuel</span><span class="val" id="a-fuel">100</span>
+            <span class="meter fuel"><i id="a-fuel-fill" style="width:100%"></i></span>
+          </div>
+          <div class="gauge special" id="a-special" title="Special charge">
+            <span class="lb">Spec</span><span class="val" id="a-spec">0%</span>
+            <span class="meter spec"><i id="a-spec-fill" style="width:0%"></i></span>
+          </div>
           <div class="wname-current" id="w-current">Shell</div>
         </div>
         <div class="weapon-bar" id="w-bar"></div>
@@ -1057,7 +1070,7 @@ export class UI {
       <div class="scout-view" id="t-scout" style="display:none"></div>
       <div class="controls-hint">
         <kbd>←→</kbd> drive · <kbd>↑↓</kbd> elev · <kbd>W/S</kbd> charge · <kbd>Space</kbd> fire<br/>
-        <kbd>1–0</kbd> or <kbd>Q/E</kbd> ordnance · <kbd>U</kbd> upgrade · <kbd>M</kbd> mute<br/>
+        <kbd>1–0</kbd> or <kbd>Q/E</kbd> ordnance · <kbd>X</kbd> special · <kbd>U</kbd> upgrade<br/>
         <kbd>wheel</kbd> zoom · <kbd>drag</kbd> the ground to look around · <kbd>C</kbd> recentre
       </div>`;
 
@@ -1181,6 +1194,36 @@ export class UI {
     this.xpFill.style.width = `${Math.min(100, frac * 100)}%`;
     this.xpLvl.textContent = `LV${tank.level}`;
     this.upgradeHint.style.display = tank.upgradePoints > 0 && !tank.isAI ? "" : "none";
+  }
+
+  /** Fades the instrument cluster when a tank would be hidden behind it. */
+  setHudDim(dim: boolean): void {
+    this.hud.querySelector("#t-bottombar")?.classList.toggle("dim", dim);
+  }
+
+  /** Screen-space box the bottom cluster occupies, in world-canvas units. */
+  hudRect(): { x0: number; y0: number; x1: number; y1: number } | null {
+    const el = this.hud.querySelector<HTMLElement>("#t-bottombar");
+    const canvas = document.getElementById("game") as HTMLCanvasElement | null;
+    if (!el || !canvas) return null;
+    const b = el.getBoundingClientRect();
+    const c = canvas.getBoundingClientRect();
+    if (c.width < 1 || c.height < 1) return null;
+    const sx = 1600 / c.width, sy = 900 / c.height;
+    return {
+      x0: (b.left - c.left) * sx, x1: (b.right - c.left) * sx,
+      y0: (b.top - c.top) * sy, y1: (b.bottom - c.top) * sy,
+    };
+  }
+
+  updateSpecial(charge: number, ready: boolean): void {
+    const val = this.hud.querySelector<HTMLElement>("#a-spec");
+    const fill = this.hud.querySelector<HTMLElement>("#a-spec-fill");
+    const box = this.hud.querySelector<HTMLElement>("#a-special");
+    if (!val || !fill || !box) return;
+    val.textContent = ready ? "RDY" : `${Math.floor(charge)}%`;
+    fill.style.width = `${Math.min(100, charge)}%`;
+    box.classList.toggle("ready", ready);
   }
 
   updateFps(fps: number, degraded: boolean): void {

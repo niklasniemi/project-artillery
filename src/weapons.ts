@@ -16,7 +16,10 @@ export type WeaponBehavior =
   | "railstrike" // instant hitscan beam that pierces terrain
   | "quake"      // collapses a wide seam of terrain, little blast
   | "leech"      // damage dealt heals the shooter
-  | "teleport";  // relocates the shooter to the impact point
+  | "teleport"   // relocates the shooter to the impact point
+  | "terraform"  // grows permanent terrain, in the air or on the ground
+  | "medbay"     // drops a healing zone that ticks for two rounds
+  | "hellstorm"; // special: marks an area for an orbital barrage
 
 export interface WeaponTierStats {
   damage: number;
@@ -25,6 +28,8 @@ export interface WeaponTierStats {
   bounceBonus?: number;  // bouncer: damage multiplier added per bounce
   digTime?: number;      // digger: seconds of tunneling
   fuse?: number;         // grenade: seconds until detonation
+  heal?: number;         // medbay: hull restored per round inside the zone
+  rounds?: number;       // medbay: how many rounds the zone persists
   turnRate?: number;     // homing: steering rate, rad/s
   pen?: number;          // railstrike: pixels of terrain penetration
   label: string;         // tier flavor name
@@ -235,6 +240,26 @@ export const WEAPONS: WeaponDef[] = [
     ],
   },
   {
+    id: "terraform", name: "Terraformer", icon: "⛰", behavior: "terraform",
+    desc: "Grows solid ground where it lands — mid-air too. Lifts anyone buried.",
+    speedMul: 0.95, gravityMul: 1, windMul: 0.8, trailColor: "#a9d18e",
+    tiers: [
+      { label: "Terraformer", damage: 0, radius: 52 },
+      { label: "Landshaper", damage: 0, radius: 68 },
+      { label: "Continent Forge", damage: 0, radius: 86 },
+    ],
+  },
+  {
+    id: "medbay", name: "Medbay", icon: "✚", behavior: "medbay",
+    desc: "Deploys a repair field that mends anything inside it for two rounds.",
+    speedMul: 0.95, gravityMul: 1, windMul: 0.9, trailColor: "#4dffa8",
+    tiers: [
+      { label: "Medbay", damage: 0, radius: 90, heal: 14, rounds: 2 },
+      { label: "Field Hospital", damage: 0, radius: 110, heal: 20, rounds: 2 },
+      { label: "Regeneration Field", damage: 0, radius: 130, heal: 27, rounds: 2 },
+    ],
+  },
+  {
     id: "teleport", name: "Teleport", icon: "🕳️", behavior: "teleport",
     desc: "No damage — relocates YOU to wherever it lands.",
     speedMul: 1, gravityMul: 0.9, windMul: 0.6, trailColor: "#b44df0",
@@ -245,6 +270,21 @@ export const WEAPONS: WeaponDef[] = [
     ],
   },
 ];
+
+/**
+ * Ordnance that is not selected from the bar: the special is unlocked by the
+ * charge meter and fired with its own key.
+ */
+export const HELLSTORM: WeaponDef = {
+  id: "hellstorm", name: "Hellstorm", icon: "☄", behavior: "hellstorm",
+  desc: "Marks a target for an orbital barrage. Charges from damage dealt.",
+  speedMul: 1, gravityMul: 1, windMul: 0.4, trailColor: "#ff2e4d",
+  tiers: [
+    { label: "Hellstorm", damage: 26, radius: 62, count: 9 },
+    { label: "Hellstorm", damage: 26, radius: 62, count: 9 },
+    { label: "Hellstorm", damage: 26, radius: 62, count: 9 },
+  ],
+};
 
 export const XP_LEVELS = [60, 150, 270, 420, 600, 810, 1050];
 
