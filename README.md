@@ -38,7 +38,7 @@ Open http://localhost:5173 — Local Play works immediately.
 cd server && npm install && npm run dev
 ```
 
-Then open **§2 Online Play**, enter your name and pick one of two paths:
+Then choose **Online Game**, enter your name and pick one of two paths:
 
 - **Host a game** — choose the rules and whether the room is listed publicly or
   reachable by code only, then share the code shown in your lobby.
@@ -73,8 +73,8 @@ where the relay lives. Either:
 1. **Vercel env var (recommended).** In the Vercel project → Settings → Environment
    Variables add `VITE_SERVER_URL = wss://your-service.onrender.com`, then redeploy.
    Vite inlines it at build time.
-2. **In-game field, no rebuild.** Open **§2 Network Op** and paste the Render host
-   into **Relay Server**. It is normalized (`your-service.onrender.com` →
+2. **In-game field, no rebuild.** Open **Online Game → Connection settings** and paste the
+   Render host into **Server**. It is normalized (`your-service.onrender.com` →
    `wss://your-service.onrender.com`) and remembered in `localStorage`.
 3. **Query string, for a one-off test.** `?server=wss://your-service.onrender.com`.
 
@@ -95,18 +95,17 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | ← / → or A / D | Drive tank (uses fuel) |
 | ↑ / ↓ or mouse drag from tank | Aim angle |
 | W / S or mouse drag distance | Power |
-| Space / click | Fire (hold nothing — instant) |
-| Space mid-air | Trigger Splitter split |
-| 1–0, Q / E, or click | Select weapon (Q/E cycles all 20, skipping bans) |
+| Space / click | Fire |
+| Space mid-air | Split a Splitter · anchor a Shielder dome where it is |
+| 1–0, Q / E, or click | Select weapon (Q/E cycles all 20, skipping bans and empties) |
 | Mouse wheel | Zoom the scouting camera (1×–4×) |
 | Drag the ground | Look around (while zoomed in; right-drag works at any zoom) |
 | C | Recentre the camera |
-| M | Mute audio |
-| F3 | Frame-rate / quality readout |
-| Space | Fire · split a Splitter · anchor a Shielder dome mid-air |
+| U | Open upgrade panel (when you have points) |
 | Esc | Pause / quit menu, or step back one level in menus |
 | Space / click | Skip a cutscene or kill cam |
-| U | Open upgrade panel (when you have points) |
+| M | Mute audio |
+| F3 | Frame-rate / quality readout |
 
 ## Roadmap
 
