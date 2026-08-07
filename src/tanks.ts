@@ -430,10 +430,32 @@ function drawBody(
   }
 }
 
+/** Height of the turret trunnion above the ground contact point. */
+function pivotOffset(typeId: string, r: number): number {
+  return -r * (typeId === "bulwark" ? 1.3 : typeId === "scout" ? 0.98 : 1.1);
+}
+
+/**
+ * World position of the barrel pivot for a hull sitting at (x, y) tilted to
+ * match the ground. Shared by the renderer and the firing code so shells
+ * always leave the muzzle that is drawn.
+ */
+export function turretPivot(
+  typeId: string, x: number, y: number, radius: number, tilt: number,
+): { x: number; y: number } {
+  const py = pivotOffset(typeId, radius);
+  // Rotate the local offset (0, py) by the hull tilt.
+  return { x: x - py * Math.sin(tilt), y: y + py * Math.cos(tilt) };
+}
+
 /**
  * Draws a chassis. Shared by the live tank renderer and the selector preview
  * so what you pick is exactly what you drive.
  * Origin is the ground contact point; the hull sits above it.
+ *
+ * `tilt` leans the hull to follow the slope it is parked on. The barrel is
+ * drawn at its own world angle regardless, since aiming is absolute — only
+ * its pivot rides with the tilted hull.
  */
 export function drawChassis(
   ctx: CanvasRenderingContext2D,
@@ -443,6 +465,7 @@ export function drawChassis(
   facing: 1 | -1,
   angle: number,
   radius: number,
+  tilt = 0,
 ): void {
   const r = radius;
   const bBox = barrelBox(r);
@@ -450,16 +473,20 @@ export function drawChassis(
   const body = bodySprite(typeId, palette, r);
   const bodyB = bodyBox(r);
 
-  // Barrel pivots at the turret trunnion, and goes down first so the
-  // turret casting overlaps its root.
-  const pivotY = y - r * (typeId === "bulwark" ? 1.3 : typeId === "scout" ? 0.98 : 1.1);
+  // Barrel goes down first so the turret casting overlaps its root.
+  const pivot = turretPivot(typeId, x, y, r, tilt);
   ctx.save();
-  ctx.translate(x, pivotY);
+  ctx.translate(pivot.x, pivot.y);
   ctx.rotate(angle);
   ctx.drawImage(barrel, -bBox.ox, -bBox.oy, bBox.w, bBox.h);
   ctx.restore();
 
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tilt);
+  ctx.translate(-x, -y);
   ctx.drawImage(body, x - bodyB.ox, y - bodyB.oy, bodyB.w, bodyB.h);
+  ctx.restore();
   void facing;
 }
 

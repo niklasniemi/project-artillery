@@ -163,6 +163,14 @@ const INTRO_OUTRO = 0.7;
 /** Hull points restored by a health crate, however it is claimed. */
 const CRATE_HEAL = 35;
 
+/** Ordnance that can be triggered mid-flight with SPACE. */
+const AIR_DEPLOYABLE = new Set(["shielder", "terraform"]);
+
+/** How fast the special meter fills, per host setting. */
+const SPECIAL_RATE: Record<string, number> = {
+  off: 0, slow: 0.3, normal: 0.55, fast: 1.0,
+};
+
 const FIRE_VOICES: Record<string, FireVoice> = {
   mortar: "heavy", nuke: "heavy", quake: "heavy",
   sniper: "energy", railstrike: "energy",
@@ -1022,40 +1030,56 @@ export class Game {
   }
 
   /**
-   * SPACE during flight is the "do the thing" key: it splits a Splitter and
-   * anchors a Shielder dome wherever the shot currently is.
+   * SPACE during flight is the "do it now" key: it splits a Splitter, and
+   * detonates any ordnance that can be placed mid-air (Shielder, Terraformer)
+   * right where the shot currently is.
    */
   private requestSplit(): void {
     if (this.online && !this.isMyTurn()) return;
     for (const p of this.projectiles) {
       if (!p.alive) continue;
-      if (p.def.behavior === "splitter" && !p.hasSplit) {
+      const b = p.def.behavior;
+      if (b === "splitter" && !p.hasSplit) {
         if (this.online) {
           const msg: SplitMsg = { x: p.x, y: p.y, vx: p.vx, vy: p.vy };
           this.online.send("split", msg);
         }
         p.splitRequested = true;
-      } else if (p.def.behavior === "shielder") {
+      } else if (AIR_DEPLOYABLE.has(b)) {
         if (this.online) {
           const msg: SplitMsg = { x: p.x, y: p.y, vx: p.vx, vy: p.vy };
           this.online.send("deploy", msg);
         }
-        this.deployShield(p);
+        this.deployInAir(p);
       }
     }
   }
 
-  /** Remote peer anchored their dome mid-flight. */
+  /** Resolves an air-deployable round at its current position. */
+  private deployInAir(p: Projectile): void {
+    if (p.def.behavior === "terraform") {
+      p.alive = false;
+      this.growTerrain(p.x, p.y, p.stats.radius * p.owner.attrs.blast);
+      return;
+    }
+    this.deployShield(p);
+  }
+
+  /** Remote peer triggered an air deployment mid-flight. */
   remoteDeploy(seat: number, msg: SplitMsg): void {
     const t = this.tanks.find((tk) => tk.seat === seat);
     if (!t) return;
-    const p = this.projectiles.find((pr) => pr.alive && pr.def.behavior === "shielder");
+    const p = this.projectiles.find((pr) => pr.alive && AIR_DEPLOYABLE.has(pr.def.behavior));
     if (p) {
       p.x = msg.x; p.y = msg.y;
-      this.deployShield(p);
+      this.deployInAir(p);
       return;
     }
-    // Our sim already resolved the shot — place the dome from the report.
+    // Our sim already resolved the shot — reproduce it from the report.
+    if (t.weaponDef.behavior === "terraform") {
+      this.growTerrain(msg.x, msg.y, t.weaponStats.radius * t.attrs.blast);
+      return;
+    }
     this.shields.push(new Shield(
       msg.x, msg.y, t.weaponStats.radius * t.attrs.blast,
       t.seat, t.team, t.palette.glow, SHIELD_HITS, 3,
@@ -1350,8 +1374,9 @@ export class Game {
     tank.hp = Math.max(0, tank.hp - dmg);
     if (tank.isEnemyOf(source)) {
       source.damageDealt += dmg;
-      // Every point of damage feeds the special meter.
-      source.special = Math.min(SPECIAL_MAX, source.special + dmg * 0.55);
+      // Every point of damage feeds the special meter, at the host's rate.
+      const rate = SPECIAL_RATE[this.settings.specialRate ?? "normal"] ?? 0.55;
+      if (rate > 0) source.special = Math.min(SPECIAL_MAX, source.special + dmg * rate);
       tank.lastDamagedBy = source;
       if (this.shot && this.shot.owner === source) this.shot.dealtDamage = true;
       this.grantXp(source, dmg);
@@ -1902,7 +1927,8 @@ export class Game {
 
       // Phase 2 — solve and swing onto the firing solution.
       if (!this.aiPlan) {
-        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.unusableFor(t));
+        this.aiPlan = planShot(t, this.tanks, this.terrain, this.wind, this.unusableFor(t),
+          this.settings.botSkill ?? "medium");
         t.selectedWeapon = this.aiPlan.weaponIndex;
         this.ui.updateWeapons(t);
         this.aiAimFrom = this.aiTimer;

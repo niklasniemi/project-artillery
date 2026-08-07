@@ -21,7 +21,7 @@ A web-based, turn-based tactical artillery game inspired by ShellShock Live — 
 - **Physics-driven combat** — gravity, per-turn dynamic wind, bounces, homing, hitscan beams
 - **In-match XP** — deal damage, level up, and upgrade your arsenal mid-game; resets every match
 - **Local play** — hotseat multiplayer (up to 4 tanks) and AI opponents with ballistic shot planning
-- **Granular lobby settings** — mode, map, terrain shape, HP, fuel, wind, turn timer, crate drops, round count, gravity, shell pace, aim-guide detail, fall damage, friendly fire, starting level, weapon bans and cinematics
+- **Granular lobby settings** — mode, map, terrain shape, HP, fuel, wind, turn timer, crate drops, round count, gravity, shell pace, aim-guide detail, fall damage, friendly fire, starting level, ammo limits, fuel resupply, special-charge rate, bot skill, weapon bans and cinematics
 - **Neon sci-fi visuals** — particles, screen shake, projectile trails, synthesized audio (no assets required)
 
 ## Run it
@@ -97,7 +97,7 @@ The server is a **lockstep relay**: it owns rooms, seats, turn order, and timeou
 | ↑ / ↓ or mouse drag from tank | Aim angle |
 | W / S or mouse drag distance | Power |
 | Space / click | Fire |
-| Space mid-air | Split a Splitter · anchor a Shielder dome where it is |
+| Space mid-air | Split a Splitter · anchor a Shielder or Terraformer where it is |
 | 1–0, Q / E, or click | Select weapon (Q/E cycles all 20, skipping bans and empties) |
 | Mouse wheel | Zoom the scouting camera (1×–4×) |
 | Drag the ground | Look around (while zoomed in; right-drag works at any zoom) |
@@ -151,6 +151,19 @@ repositions with its fuel before firing, which is what gives the mobile chassis
 their value; without that, mobility stats are worth nothing in a duel.
 
 ## Design notes
+
+**Bots have three levels.** Skill controls how hard the AI searches for a
+solution *and* how much error it adds on top, so the tiers are genuinely
+different rather than the same shot with noise. Measured median miss distance
+against a target ~750px away: **easy ~295px, medium ~86px, hard ~34px**.
+
+**Hulls sit parallel to the ground.** Slope is averaged across three sample
+pairs spanning the hull footprint — a single pair either side picks up every
+pebble and makes the tank twitch — and capped at ~26°, roughly the steepest a
+tracked vehicle actually rests on. The barrel pivot rides with the tilted hull
+while the barrel itself stays at its absolute aim angle, and the firing code
+uses the same pivot so shells always leave the muzzle that is drawn.
+
 
 **Shields are objects, not terrain.** The old dome stamped solid ground, which
 by definition blocks everything. Making shields real entities allows the

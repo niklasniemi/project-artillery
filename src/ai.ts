@@ -10,6 +10,30 @@ export interface AiPlan {
   power: number;
 }
 
+export type AiSkill = "easy" | "medium" | "hard";
+
+/**
+ * Bot competence. `samples` is how many candidate shots it searches — fewer
+ * means it settles for a worse solution — and the wobble figures are the
+ * error deliberately added on top of whatever it found.
+ */
+interface SkillProfile {
+  samples: number;
+  angleWobble: number;
+  powerWobble: number;
+  /** Chance of simply not bothering to aim well at all. */
+  flubChance: number;
+}
+
+const SKILLS: Record<AiSkill, SkillProfile> = {
+  // Sprays wildly: barely searches, then throws the answer off badly.
+  easy: { samples: 14, angleWobble: 0.16, powerWobble: 22, flubChance: 0.34 },
+  // Lands some, misses some.
+  medium: { samples: 70, angleWobble: 0.055, powerWobble: 8, flubChance: 0.1 },
+  // Near-perfect, with just enough error to stay beatable.
+  hard: { samples: 190, angleWobble: 0.016, powerWobble: 3, flubChance: 0 },
+};
+
 
 
 /**
@@ -113,7 +137,9 @@ export function planMove(
 export function planShot(
   shooter: Tank, tanks: Tank[], terrain: Terrain, wind: number,
   banned: ReadonlySet<number> = new Set(),
+  skill: AiSkill = "hard",
 ): AiPlan {
+  const prof = SKILLS[skill] ?? SKILLS.hard;
   const enemies = tanks.filter((t) => t.alive && t.isEnemyOf(shooter));
   if (enemies.length === 0) {
     // Everyone's dead or friendly (points-mode respawn gap) — fire far off to the side.
@@ -146,7 +172,7 @@ export function planShot(
   let bestErr = Infinity;
 
   const towards = target.x > shooter.x ? 1 : -1;
-  for (let i = 0; i < 160; i++) {
+  for (let i = 0; i < prof.samples; i++) {
     // Bias angles into the upper arc facing the target.
     const elevation = 0.12 + Math.random() * 1.35; // radians above horizontal
     const angle = towards === 1 ? -elevation : -Math.PI + elevation;
@@ -163,9 +189,15 @@ export function planShot(
     }
   }
 
-  // Humanizing error: worse when the best found shot was already poor.
-  const wobble = bestErr < TANK_RADIUS * 2 ? 0.035 : 0.015;
-  best.angle += (Math.random() - 0.5) * wobble * 2;
-  best.power = clamp(best.power + (Math.random() - 0.5) * 5, 1, 100);
+  // Occasionally a weak bot just fluffs it entirely.
+  if (Math.random() < prof.flubChance) {
+    best.angle += (Math.random() - 0.5) * 0.45;
+    best.power = clamp(best.power + (Math.random() - 0.5) * 45, 1, 100);
+    return best;
+  }
+
+  // Otherwise blur the solution by however much this skill level allows.
+  best.angle += (Math.random() - 0.5) * prof.angleWobble * 2;
+  best.power = clamp(best.power + (Math.random() - 0.5) * prof.powerWobble * 2, 1, 100);
   return best;
 }

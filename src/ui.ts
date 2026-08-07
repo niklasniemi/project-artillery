@@ -7,6 +7,7 @@ import { storedServerUrl, setStoredServerUrl, resolveServerUrl } from "./net";
 import { TANK_TYPES, TANK_COLORS, Loadout, typeById, paletteFor, drawChassis } from "./tanks";
 import { MAP_THEMES, paintThumbnail } from "./themes";
 import { GravityMode, PaceMode } from "./physics";
+import { AiSkill } from "./ai";
 import { weaponIcon } from "./icons";
 import { TitleScene } from "./titlescene";
 
@@ -50,6 +51,10 @@ export interface MatchSettings {
   visibility: "public" | "private";
   /** Rounds per weapon; 0 means unlimited. Shell is always unlimited. */
   ammoLimit: number;
+  /** How fast the special meter fills. */
+  specialRate: "off" | "slow" | "normal" | "fast";
+  /** Bot competence. */
+  botSkill: AiSkill;
 }
 
 export interface LobbyPlayer {
@@ -325,6 +330,7 @@ export class UI {
     bits.push(timer === "0" ? "no clock" : `${timer}s`);
     if (bankVal("ammo") !== "0") bits.push(`${bankVal("ammo")} rounds`);
     if (bankVal("resupply") !== "off") bits.push("resupply");
+    bits.push(`${bankVal("bots")} bots`);
     set("rules", bits.join(" · "));
     set("armory", this.banned.size === 0
       ? "All guns enabled"
@@ -367,6 +373,8 @@ export class UI {
       visibility: (root.querySelector<HTMLElement>('[data-bank="visibility"]')?.dataset.value
         ?? "public") as MatchSettings["visibility"],
       ammoLimit: parseInt(bankVal("ammo"), 10),
+      specialRate: bankVal("special") as MatchSettings["specialRate"],
+      botSkill: bankVal("bots") as AiSkill,
     };
   }
 
@@ -480,6 +488,17 @@ export class UI {
         { value: "2", label: "2" },
         { value: "3", label: "3" },
       ], "0")}
+      ${bank("special", "Special Charge", [
+        { value: "off", label: "Disabled" },
+        { value: "slow", label: "Slow" },
+        { value: "normal", label: "Normal" },
+        { value: "fast", label: "Fast" },
+      ], "normal")}
+      ${bank("bots", "Bot Skill", [
+        { value: "easy", label: "Easy" },
+        { value: "medium", label: "Medium" },
+        { value: "hard", label: "Hard" },
+      ], "medium")}
       ${dial(`${prefix}-hp`, "Hull Points", 50, 200, 10, 100)}
       ${dial(`${prefix}-fuel`, "Fuel Load", 0, 250, 10, 100)}`;
   }

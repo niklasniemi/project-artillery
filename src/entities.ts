@@ -1,12 +1,14 @@
 import { Terrain } from "./terrain";
 import { WEAPONS, WeaponDef, WeaponTierStats } from "./weapons";
 import { clamp, TAU } from "./util";
-import { Loadout, TankType, TankAttrs, TankPalette, typeById, paletteFor, drawChassis } from "./tanks";
+import { Loadout, TankType, TankAttrs, TankPalette, typeById, paletteFor, drawChassis, turretPivot } from "./tanks";
 import { physics } from "./physics";
 
 export const TANK_RADIUS = 14;
 const CLIMB_LIMIT = 14;       // max pixels of slope a tank can climb per step
 const FALL_DAMAGE_START = 90; // free-fall pixels before damage
+/** Steepest hull lean, in radians (~26°). */
+const MAX_TILT = 0.45;
 
 export type { TankPalette };
 
@@ -23,6 +25,8 @@ export class Tank {
   vy = 0;
   fallFrom = -1;
   facing: 1 | -1 = 1;
+  /** Hull lean, in radians, matching the ground slope. */
+  tilt = 0;
 
   readonly type: TankType;
   readonly attrs: TankAttrs;
@@ -119,6 +123,7 @@ export class Tank {
       // If terrain was added on top of us (dome edge), pop up gently.
       let pops = 0;
       while (terrain.solid(this.x, this.y - 1) && pops < 26) { this.y--; pops++; }
+      this.updateTilt(terrain);
       if (this.fallFrom >= 0) {
         const fall = this.y - this.fallFrom;
         this.fallFrom = -1;
@@ -129,6 +134,7 @@ export class Tank {
       return 0;
     }
     if (this.fallFrom < 0) this.fallFrom = this.y;
+    this.tilt *= 0.9;  // level out while airborne
     this.vy += physics.gravity * dt;
     this.y += this.vy * dt;
     const surface = terrain.surfaceY(this.x, Math.max(0, this.y - 2) | 0);
@@ -136,11 +142,40 @@ export class Tank {
     return 0;
   }
 
+  /**
+   * Leans the hull to match the slope under it. Sampled either side of the
+   * contact point, so a tank parked on a hillside sits parallel to the ground
+   * rather than floating level.
+   */
+  updateTilt(terrain: Terrain): void {
+    // Averaged over a few samples across the hull footprint: a single pair
+    // either side picks up every pebble and makes the tank twitch.
+    const from = Math.max(0, this.y - 30) | 0;
+    let sumL = 0, nL = 0, sumR = 0, nR = 0;
+    for (const d of [0.55, 0.9, 1.25]) {
+      const span = TANK_RADIUS * d;
+      const yl = terrain.surfaceY(this.x - span, from);
+      const yr = terrain.surfaceY(this.x + span, from);
+      if (yl >= 0) { sumL += yl; nL++; }
+      if (yr >= 0) { sumR += yr; nR++; }
+    }
+    if (nL === 0 || nR === 0) {
+      // Overhanging an edge — ease back to level rather than snapping.
+      this.tilt *= 0.85;
+      return;
+    }
+    const rise = sumR / nR - sumL / nL;
+    // Capped at ~26°, roughly the steepest slope a tracked vehicle sits on.
+    const target = clamp(Math.atan2(rise, TANK_RADIUS * 1.8), -MAX_TILT, MAX_TILT);
+    this.tilt += (target - this.tilt) * 0.3;
+  }
+
   get barrelTip(): { x: number; y: number } {
     const len = this.type.id === "howitzer" ? 36 : 26;
+    const pivot = turretPivot(this.type.id, this.x, this.y, TANK_RADIUS * 1.3, this.tilt);
     return {
-      x: this.x + Math.cos(this.angle) * len,
-      y: this.y - 10 + Math.sin(this.angle) * len,
+      x: pivot.x + Math.cos(this.angle) * len,
+      y: pivot.y + Math.sin(this.angle) * len,
     };
   }
 
@@ -190,7 +225,7 @@ export class Tank {
 
     // Drawn a little larger than the collision radius so the chassis detail
     // is readable. Purely cosmetic — TANK_RADIUS still governs hits.
-    drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS * 1.3);
+    drawChassis(ctx, this.type.id, palette, x, y, this.facing, this.angle, TANK_RADIUS * 1.3, this.tilt);
 
     // HP bar + name
     const w = 40;
